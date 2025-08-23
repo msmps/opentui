@@ -105,7 +105,7 @@ function validateOptions(id: string, options: RenderableOptions): void {
   }
 }
 
-function isValidPercentage(value: any): value is `${number}%` {
+export function isValidPercentage(value: any): value is `${number}%` {
   if (typeof value === "string" && value.endsWith("%")) {
     const numPart = value.slice(0, -1)
     const num = parseFloat(numPart)
@@ -820,6 +820,7 @@ export abstract class Renderable extends EventEmitter {
     if (this._visible) {
       this.handleFrameBufferResize(width, height)
       this.onResize(width, height)
+      this.layoutNode.updatePercentageBasedDimensions()
       this.needsUpdate()
     }
   }

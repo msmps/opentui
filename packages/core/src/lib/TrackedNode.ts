@@ -1,5 +1,6 @@
-import Yoga, { type Config, type Node as YogaNode } from "yoga-layout"
 import { EventEmitter } from "events"
+import Yoga, { type Config, type Node as YogaNode } from "yoga-layout"
+import { isValidPercentage } from "../Renderable"
 
 // TrackedNode
 // A TypeScript wrapper for Yoga nodes that tracks indices and maintains parent-child relationships.
@@ -99,14 +100,34 @@ class TrackedNode<T extends NodeMetadata = NodeMetadata> extends EventEmitter {
     this.children.push(childNode)
     this.yogaNode.insertChild(childNode.yogaNode, index)
 
+    this.updateChildDimensions(childNode)
+
+    return index
+  }
+
+  private updateChildDimensions<U extends NodeMetadata>(childNode: TrackedNode<U>): void {
     try {
-      childNode.yogaNode.setWidth(childNode.parseWidth(childNode._width))
-      childNode.yogaNode.setHeight(childNode.parseHeight(childNode._height))
+      childNode.setWidth(childNode._width)
+      childNode.setHeight(childNode._height)
     } catch (e) {
       console.error("Error setting width and height", e)
     }
+  }
 
-    return index
+  public updatePercentageBasedDimensions(): void {
+    // Update this node's dimensions if they are percentage-based
+    if (isValidPercentage(this._width)) {
+      this.setWidth(this._width)
+    }
+
+    if (isValidPercentage(this._height)) {
+      this.setHeight(this._height)
+    }
+
+    // Recursively update all children
+    for (const child of this.children) {
+      child.updatePercentageBasedDimensions()
+    }
   }
 
   getChildIndex<U extends NodeMetadata>(childNode: TrackedNode<U>): number {
@@ -174,12 +195,7 @@ class TrackedNode<T extends NodeMetadata = NodeMetadata> extends EventEmitter {
     this.children.splice(boundedIndex, 0, childNode)
     this.yogaNode.insertChild(childNode.yogaNode, boundedIndex)
 
-    try {
-      childNode.yogaNode.setWidth(childNode.parseWidth(childNode._width))
-      childNode.yogaNode.setHeight(childNode.parseHeight(childNode._height))
-    } catch (e) {
-      console.error("Error setting width and height", e)
-    }
+    this.updateChildDimensions(childNode)
 
     return boundedIndex
   }
@@ -232,4 +248,4 @@ function createTrackedNode<T extends NodeMetadata>(metadata: T = {} as T, yogaCo
   return new TrackedNode<T>(yogaNode, metadata)
 }
 
-export { TrackedNode, createTrackedNode }
+export { createTrackedNode, TrackedNode }
