@@ -2392,7 +2392,8 @@ pub const OptimizedBuffer = struct {
                 };
                 const line_col_offset = vline.document_cell_offset;
 
-                if (currentX >= @as(i32, @intCast(self.width))) {
+                // A glyph in the last column can still take marks that start this chunk.
+                if (currentX >= @as(i32, @intCast(self.width)) and mark_base == null) {
                     document_cell_offset += vchunk.width_cols;
                     currentX += @intCast(vchunk.width_cols);
                     continue;
@@ -2407,7 +2408,7 @@ pub const OptimizedBuffer = struct {
                     special_idx += 1;
                 }
 
-                text_buffer_loop: while (byte_offset < byte_end and col < col_end) {
+                text_buffer_loop: while (byte_offset < byte_end) {
                     const at_special = special_idx < render_clusters.len and render_clusters[special_idx].byte_start == byte_offset;
 
                     var grapheme_bytes: []const u8 = undefined;
@@ -2432,8 +2433,14 @@ pub const OptimizedBuffer = struct {
                         cluster_width_cols = if (ascii) 1 else utf8.getWidthAt(grapheme_bytes, 0, text_buffer.tabWidth(), text_buffer.controlDisplay(), text_buffer.widthMethod());
                         byte_offset = next_byte_offset;
                     }
-                    // Only a glyph that this iteration draws, or a zero-width cluster, sets it again.
-                    const previous_glyph = mark_base;
+                    // A combining mark joins the glyph before it, which passed the checks below; other
+                    // zero-width clusters keep that glyph. Only a glyph that this iteration draws sets it again.
+                    if (cluster_width_cols == 0) {
+                        if (mark_base != null and utf8.isCombiningMark(grapheme_bytes)) {
+                            mark_base = try self.attachCombiningMark(checked, grapheme_bytes, mark_base.?, @intCast(currentY), text_buffer.widthMethod());
+                        }
+                        continue;
+                    }
                     mark_base = null;
 
                     if (rendered_col_in_vline < horizontal_offset) {
@@ -2616,17 +2623,6 @@ pub const OptimizedBuffer = struct {
                         }
                     }
 
-                    if (cluster_width_cols == 0) {
-                        // A combining mark joins the glyph before it; other zero-width clusters keep it.
-                        if (previous_glyph) |glyph| {
-                            mark_base = if (utf8.isCombiningMark(grapheme_bytes))
-                                try self.attachCombiningMark(checked, grapheme_bytes, glyph, @intCast(currentY))
-                            else
-                                glyph;
-                        }
-                        continue;
-                    }
-
                     var drawFg = finalFg;
                     var drawBg = finalBg;
                     const drawAttributes = finalAttributes;
@@ -2727,6 +2723,8 @@ pub const OptimizedBuffer = struct {
                     rendered_col_in_vline += cluster_width_cols;
                     col += cluster_width_cols;
                 }
+                // The ellipsis stands for dropped text, so the marks after it have no base glyph.
+                if (chunk == &layout_view.ellipsis_chunk) mark_base = null;
             }
 
             const is_last_vline_of_logical_line = (slice_idx + 1 >= virtual_lines[firstVisibleLine..lastPossibleLine].len) or
@@ -2746,8 +2744,8 @@ pub const OptimizedBuffer = struct {
     /// Combines a zero-width mark with the glyph that this draw wrote just before it, as if both
     /// were one cluster. The cell keeps its colors, which already have opacity applied.
     /// Returns the combined glyph, or null when the cell does not hold that glyph or cannot
-    /// hold the combination.
-    fn attachCombiningMark(self: *OptimizedBuffer, comptime checked: bool, mark: []const u8, base: MarkBase, y: u32) !?MarkBase {
+    /// hold the combination in the same cells (U+FE0F can widen a cluster beyond its layout).
+    fn attachCombiningMark(self: *OptimizedBuffer, comptime checked: bool, mark: []const u8, base: MarkBase, y: u32, width_method: utf8.WidthMethod) !?MarkBase {
         const index = self.coordsToIndex(base.x, y);
         // A blended space keeps the glyph under it, which this draw did not write.
         if (self.buffer.char[index] != base.char) return null;
@@ -2765,6 +2763,7 @@ pub const OptimizedBuffer = struct {
         if (base_bytes.len + mark.len > combined.len) return null;
         @memcpy(combined[0..base_bytes.len], base_bytes);
         @memcpy(combined[base_bytes.len..][0..mark.len], mark);
+        if (utf8.getGraphemeWidthAt(combined[0 .. base_bytes.len + mark.len], 0, 1, .hidden, width_method) != gp.encodedCharWidth(base.char)) return null;
         const id = self.acquireGlyph(combined[0 .. base_bytes.len + mark.len]) catch |err| {
             if (checked) return err;
             self.logger.warn("Failed to allocate grapheme: {}", .{err});
