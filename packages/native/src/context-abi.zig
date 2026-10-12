@@ -3047,10 +3047,16 @@ test "Context editor transport copies styles selections positions history and li
     try std.testing.expectEqual(count, position.offset);
     try std.testing.expectEqual(c.OT_OK, api.ot_edit_buffer_measure_text(handle, &edit, null, 0, &count));
     try std.testing.expectEqual(0, count);
+    // Without a buffer, the same settings give the same offset. Tab width 0 rounds to the default.
+    try std.testing.expectEqual(c.OT_OK, api.ot_edit_measure_text(handle, "a\xe7\x95\x8c\t\nz", 7, c.OT_WIDTH_METHOD_UNICODE, 0, &count));
+    try std.testing.expectEqual(7, count);
+    try std.testing.expectEqual(c.OT_OK, api.ot_edit_measure_text(handle, null, 0, c.OT_WIDTH_METHOD_UNICODE, 0, &count));
+    try std.testing.expectEqual(0, count);
     try std.testing.expectEqual(c.OT_WRONG_KIND, api.ot_edit_buffer_measure_text(handle, &view, "a", 1, &count));
     core.mutating = true;
     core.scene_measuring = true;
     try std.testing.expectEqual(c.OT_OK, api.ot_editor_view_get_info(handle, &view, 0, &info));
+    try std.testing.expectEqual(c.OT_OK, api.ot_edit_measure_text(handle, "a", 1, c.OT_WIDTH_METHOD_UNICODE, 0, &count));
     try std.testing.expectEqual(c.OT_CONTEXT_BUSY, api.ot_editor_view_select(handle, &view, &selection, &count));
     core.scene_measuring = false;
     core.mutating = false;

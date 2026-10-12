@@ -3409,6 +3409,8 @@ export class FFIRenderLib {
     { service: ClipboardServiceHandle; handle: BigUint64Array }
   >()
   private audioEngines = new Map<AudioEngineHandle, NativeContextHandle>()
+  // Measures without an edit buffer share this Context. The library owns it, so dispose releases it.
+  private editMeasureContext?: NativeContextHandle
   private readonly invalidStandaloneHandle = new BigUint64Array(nativeLayouts.ot_handle.size / 8)
   public readonly encoder: TextEncoder = new TextEncoder()
   private readonly emptyBytes = new Uint8Array(0)
@@ -5046,6 +5048,20 @@ export class FFIRenderLib {
     nativeResult(
       "ot_edit_buffer_measure_text",
       this.opentui.symbols.ot_edit_buffer_measure_text(pointer, handle, viewOrNull(input), input.length, output),
+    )
+    return output[0]
+  }
+
+  public editMeasureText(bytes: Uint8Array, widthMethod: WidthMethod, tabWidth: number): number {
+    const method = widthMethodId(widthMethod, "editor")
+    const width = toSafeFFIU32Length(tabWidth, "Edit buffer tab width")
+    const input = sessionBytes(bytes, "Edit buffer measure length")
+    const output = new Uint32Array(1)
+    this.editMeasureContext ??= this.createContext({ objectCapacity: 1, renderCellsMax: 1 })
+    const pointer = this.nativeContextPointer(this.editMeasureContext, "ot_edit_measure_text")
+    nativeResult(
+      "ot_edit_measure_text",
+      this.opentui.symbols.ot_edit_measure_text(pointer, viewOrNull(input), input.length, method, width, output),
     )
     return output[0]
   }
@@ -7872,10 +7888,12 @@ export class FFIRenderLib {
     if (this.clipboardServices.size > 0) {
       throw new Error("Cannot dispose OpenTUI native library while clipboard services are active")
     }
-    if (this.nativeContexts.size !== this.audioEngines.size) {
+    if (this.nativeContexts.size !== this.audioEngines.size + Number(this.editMeasureContext !== undefined)) {
       throw new NativeError("dispose", NativeStatus.ContextBusy)
     }
     this.yogaHost?.dispose()
+    if (this.editMeasureContext) this.releaseContext(this.editMeasureContext)
+    this.editMeasureContext = undefined
     for (const [engine, context] of this.audioEngines) {
       this.releaseContext(context)
       this.audioEngines.delete(engine)

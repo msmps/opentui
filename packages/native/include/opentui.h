@@ -1282,6 +1282,11 @@ ot_status ot_edit_buffer_get_range(ot_context *, const ot_handle *, uint32_t by_
  * byte limit and UTF-8 validation of set_text apply. Failures preserve out_width. */
 ot_status ot_edit_buffer_measure_text(ot_context *, const ot_handle *edit_buffer,
     const uint8_t *bytes, uint32_t byte_count, uint32_t *out_width);
+/* Measures as ot_edit_buffer_measure_text does on an edit buffer with this width method and
+ * tab width, without a buffer. tab_width rounds as in ot_edit_buffer_set_tab_width, so 0
+ * gives the tab width of a new edit buffer; a tab_width over 255 fails. */
+ot_status ot_edit_measure_text(ot_context *, const uint8_t *bytes, uint32_t byte_count,
+    uint32_t width_method, uint32_t tab_width, uint32_t *out_width);
 
 #define OT_EDITOR_STYLE_FOREGROUND UINT32_C(1)
 #define OT_EDITOR_STYLE_BACKGROUND UINT32_C(2)

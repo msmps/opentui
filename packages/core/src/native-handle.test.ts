@@ -279,15 +279,23 @@ describe("native handles", () => {
         }
       },
     ],
-  ] as const)("a dispose refused by %s keeps audio engines", (_, reason, hold) => {
+  ] as const)("a dispose refused by %s keeps audio engines and the measure Context", (_, reason, hold) => {
     const lib = new FFIRenderLib()
     const engine = lib.createAudioEngine()!
+    const measure = () => lib.editMeasureText(lib.encoder.encode("\t"), "unicode", 0)
+    let width = 0
+    // The first measure creates the Context, which a Yoga callback such as a layout measure may do.
+    lib.getYogaHost().invokeCallback(() => (width = measure()))
+    expect(width).toBe(2)
     const release = hold(lib)
     expect(() => lib.dispose()).toThrow(reason)
     expect(lib.audioGetStats(engine)).not.toBeNull()
+    expect(measure()).toBe(2)
     release()
     lib.dispose()
+    expect((lib as unknown as { nativeContexts: Map<unknown, unknown> }).nativeContexts.size).toBe(0)
     expect(() => lib.createContext({ objectCapacity: 1, renderCellsMax: 1 })).toThrow("disposed")
+    expect(measure).toThrow("disposed")
   })
 
   // The test outlives the child's timeout, so a hung child fails with its signal instead of a test timeout.
