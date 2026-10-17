@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test"
 import { createTestRenderer, ManualClock } from "@opentui/core/testing"
-import { useEffect, useState } from "react"
+import { memo, useEffect, useState } from "react"
+import { useKeyboard } from "../src/hooks/use-keyboard.js"
 import { createRoot, flushSync, type Root } from "../src/reconciler/renderer.js"
 
 let setup: Awaited<ReturnType<typeof createTestRenderer>>
@@ -17,6 +18,12 @@ test.each(["unmount", "destroy"] as const)("rerenders preserve state and clean u
   const listeners = setup.renderer.listenerCount("destroy")
   const events: string[] = []
   let setCount!: (value: number) => void
+  let keyRenders = 0
+  const Keys = memo(() => {
+    keyRenders++
+    useKeyboard(() => events.push("key"))
+    return null
+  })
   function Counter({ label }: { label: string }) {
     const [count, update] = useState(0)
     setCount = update
@@ -29,6 +36,7 @@ test.each(["unmount", "destroy"] as const)("rerenders preserve state and clean u
     return (
       <text>
         {label}:{count}
+        <Keys />
       </text>
     )
   }
@@ -42,15 +50,17 @@ test.each(["unmount", "destroy"] as const)("rerenders preserve state and clean u
   expect(events).toEqual(["mount:first"])
 
   flushSync(() => root.render(<Counter key="replacement" label="third" />))
-  expect(events).toEqual(["mount:first", "cleanup:first", "mount:third"])
+  setup.mockInput.pressKey("x")
+  expect(events).toEqual(["mount:first", "cleanup:first", "mount:third", "key"])
+  expect(keyRenders).toBe(2)
   if (teardown === "unmount") root.unmount()
   else setup.renderer.destroy()
-  expect(events).toEqual(["mount:first", "cleanup:first", "mount:third", "cleanup:third"])
+  expect(events).toEqual(["mount:first", "cleanup:first", "mount:third", "key", "cleanup:third"])
   expect(setup.renderer.listenerCount("destroy")).toBe(teardown === "unmount" ? listeners : 0)
 
   flushSync(() => root.render(<Counter label="fourth" />))
   setup.renderer.destroy()
-  expect(events.slice(4)).toEqual(teardown === "unmount" ? ["mount:fourth", "cleanup:fourth"] : [])
+  expect(events.slice(5)).toEqual(teardown === "unmount" ? ["mount:fourth", "cleanup:fourth"] : [])
 })
 
 test("explicit renders retry the same element after an error", async () => {

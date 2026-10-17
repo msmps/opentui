@@ -29,6 +29,7 @@ export type Root = {
 export function createRoot(renderer: CliRenderer): Root {
   let container: OpaqueRoot | null = null
   let renderVersion = 0
+  const appContext = { keyHandler: renderer.keyInput, renderer }
 
   const cleanup = () => {
     if (container) {
@@ -45,7 +46,7 @@ export function createRoot(renderer: CliRenderer): Root {
       engine.attach(renderer)
       const element = React.createElement(
         AppContext.Provider,
-        { value: { keyHandler: renderer.keyInput, renderer } },
+        { value: appContext },
         // Explicit renders retry failed trees without remounting healthy children.
         React.createElement(ErrorBoundary, { resetKey: ++renderVersion, children: node }),
       )
