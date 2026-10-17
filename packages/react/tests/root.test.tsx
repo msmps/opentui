@@ -8,6 +8,7 @@ let setup: Awaited<ReturnType<typeof createTestRenderer>>
 let root: Root
 
 beforeEach(async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false })
   setup = await createTestRenderer({ width: 20, height: 6, clock: new ManualClock() })
   root = createRoot(setup.renderer)
 })
