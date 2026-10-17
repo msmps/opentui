@@ -1,30 +1,21 @@
 import React from "react"
 
-type ErrorBoundaryProps = { children: React.ReactNode; resetKey?: number }
-type ErrorBoundaryState = { hasError: boolean; error: Error | null; resetKey?: number }
+type ErrorBoundaryProps = { children: React.ReactNode; resetKey: number }
+type ErrorBoundaryState = { error: Error | null; resetKey?: number }
 
 export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  constructor(props: ErrorBoundaryProps) {
-    super(props)
-    this.state = { hasError: false, error: null, resetKey: props.resetKey }
-  }
+  override state: ErrorBoundaryState = { error: null }
 
   static getDerivedStateFromProps(props: ErrorBoundaryProps, state: ErrorBoundaryState): ErrorBoundaryState | null {
-    if (props.resetKey !== state.resetKey) {
-      return { hasError: false, error: null, resetKey: props.resetKey }
-    }
-    return null
+    return props.resetKey === state.resetKey ? null : { error: null, resetKey: props.resetKey }
   }
 
-  static getDerivedStateFromError(error: Error): {
-    hasError: boolean
-    error: Error
-  } {
-    return { hasError: true, error }
+  static getDerivedStateFromError(error: Error): Partial<ErrorBoundaryState> {
+    return { error }
   }
 
   override render(): any {
-    if (this.state.hasError && this.state.error) {
+    if (this.state.error) {
       return (
         <box style={{ flexDirection: "column", padding: 2 }}>
           <text fg="red">{this.state.error.stack || this.state.error.message}</text>
