@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test"
 import { createTestRenderer, ManualClock } from "@opentui/core/testing"
-import { memo, useEffect, useState } from "react"
+import { act, memo, useEffect, useState } from "react"
 import { useKeyboard } from "../src/hooks/use-keyboard.js"
 import { createRoot, flushSync, type Root } from "../src/reconciler/renderer.js"
 
@@ -85,9 +85,12 @@ test("explicit renders retry a tree that failed on a later render", async () => 
 
 test("render, render, and destroy in one tick log no error", async () => {
   using errors = spyOn(console, "error")
-  root.render(<box />)
-  root.render(<box />)
-  setup.renderer.destroy()
-  await Bun.sleep(20)
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  // act() runs the work that the renders queued only after destroy(), when it leaves the callback.
+  await act(async () => {
+    root.render(<box />)
+    root.render(<box />)
+    setup.renderer.destroy()
+  })
   expect(errors).not.toHaveBeenCalled()
 })
