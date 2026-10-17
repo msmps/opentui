@@ -63,18 +63,31 @@ test.each(["unmount", "destroy"] as const)("rerenders preserve state and clean u
   expect(events.slice(5)).toEqual(teardown === "unmount" ? ["mount:fourth", "cleanup:fourth"] : [])
 })
 
-test("explicit renders retry the same element after an error", async () => {
+test("explicit renders retry a tree that failed on a later render", async () => {
   using errors = spyOn(console, "error").mockImplementation(() => {})
-  let broken = true
+  let broken = false
   function App() {
-    if (broken) throw new Error("root render failed")
-    return <text>recovered</text>
+    if (broken) throw new Error("root")
+    return <text>healthy</text>
   }
   const element = <App />
   flushSync(() => root.render(element))
-  expect(errors).toHaveBeenCalled()
+  broken = true
+  flushSync(() => root.render(<App />))
+  await setup.renderOnce()
+  expect(setup.captureCharFrame()).toContain("Error: root")
+  expect(errors).toHaveBeenCalledTimes(1)
   broken = false
   flushSync(() => root.render(element))
   await setup.renderOnce()
-  expect(setup.captureCharFrame()).toContain("recovered")
+  expect(setup.captureCharFrame()).toContain("healthy")
+})
+
+test("render, render, and destroy in one tick log no error", async () => {
+  using errors = spyOn(console, "error")
+  root.render(<box />)
+  root.render(<box />)
+  setup.renderer.destroy()
+  await Bun.sleep(20)
+  expect(errors).not.toHaveBeenCalled()
 })
