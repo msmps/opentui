@@ -32,7 +32,7 @@ export function createRoot(renderer: CliRenderer): Root {
 
   const cleanup = () => {
     if (container) {
-      reconciler.updateContainer(null, container, null, () => {})
+      reconciler.updateContainerSync(null, container, null, () => {})
       reconciler.flushSyncWork()
       container = null
     }
