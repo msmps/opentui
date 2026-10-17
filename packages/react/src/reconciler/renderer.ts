@@ -32,12 +32,12 @@ export function createRoot(renderer: CliRenderer): Root {
   const appContext = { keyHandler: renderer.keyInput, renderer }
 
   const cleanup = () => {
-    if (container) {
-      renderer.off(CliRenderEvents.DESTROY, cleanup)
-      reconciler.updateContainerSync(null, container, null, () => {})
-      reconciler.flushSyncWork()
-      container = null
-    }
+    const current = container
+    if (!current) return
+    container = null
+    renderer.off(CliRenderEvents.DESTROY, cleanup)
+    reconciler.updateContainerSync(null, current, null, () => {})
+    reconciler.flushSyncWork()
   }
 
   return {

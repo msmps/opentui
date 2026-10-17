@@ -29,7 +29,10 @@ test.each(["unmount", "destroy"] as const)("rerenders preserve state and clean u
     setCount = update
     useEffect(() => {
       events.push(`mount:${label}`)
-      return () => void events.push(`cleanup:${label}`)
+      return () => {
+        events.push(`cleanup:${label}`)
+        if (label === "third") root.render(<Counter label="fourth" />)
+      }
     }, [])
     return (
       <text>
@@ -52,7 +55,7 @@ test.each(["unmount", "destroy"] as const)("rerenders preserve state and clean u
   if (teardown === "unmount") root.unmount()
   else setup.renderer.destroy()
   expect(events).toEqual(["mount:first", "cleanup:first", "mount:third", "key", "cleanup:third"])
-  expect(setup.renderer.listenerCount("destroy")).toBe(teardown === "unmount" ? listeners : 0)
+  expect(setup.renderer.listenerCount("destroy")).toBe(teardown === "unmount" ? listeners + 1 : 0)
 
   flushSync(() => root.render(<Counter label="fourth" />))
   setup.renderer.destroy()
