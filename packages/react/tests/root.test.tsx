@@ -14,6 +14,7 @@ beforeEach(async () => {
 afterEach(() => setup.dispose())
 
 test.each(["unmount", "destroy"] as const)("rerenders preserve state and clean up effects on %s", async (teardown) => {
+  const listeners = setup.renderer.listenerCount("destroy")
   const events: string[] = []
   let setCount!: (value: number) => void
   function Counter({ label }: { label: string }) {
@@ -33,6 +34,7 @@ test.each(["unmount", "destroy"] as const)("rerenders preserve state and clean u
   }
 
   flushSync(() => root.render(<Counter label="first" />))
+  expect(setup.renderer.listenerCount("destroy")).toBe(listeners + 1)
   flushSync(() => setCount(7))
   flushSync(() => root.render(<Counter label="second" />))
   await setup.renderOnce()
@@ -44,6 +46,11 @@ test.each(["unmount", "destroy"] as const)("rerenders preserve state and clean u
   if (teardown === "unmount") root.unmount()
   else setup.renderer.destroy()
   expect(events).toEqual(["mount:first", "cleanup:first", "mount:third", "cleanup:third"])
+  expect(setup.renderer.listenerCount("destroy")).toBe(teardown === "unmount" ? listeners : 0)
+
+  flushSync(() => root.render(<Counter label="fourth" />))
+  setup.renderer.destroy()
+  expect(events.slice(4)).toEqual(teardown === "unmount" ? ["mount:fourth", "cleanup:fourth"] : [])
 })
 
 test("explicit renders retry the same element after an error", async () => {

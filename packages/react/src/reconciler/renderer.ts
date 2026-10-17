@@ -32,13 +32,12 @@ export function createRoot(renderer: CliRenderer): Root {
 
   const cleanup = () => {
     if (container) {
+      renderer.off(CliRenderEvents.DESTROY, cleanup)
       reconciler.updateContainerSync(null, container, null, () => {})
       reconciler.flushSyncWork()
       container = null
     }
   }
-
-  if (!renderer.isDestroyed) renderer.once(CliRenderEvents.DESTROY, cleanup)
 
   return {
     render: (node: ReactNode) => {
@@ -54,6 +53,7 @@ export function createRoot(renderer: CliRenderer): Root {
         reconciler.updateContainer(element, container, null, () => {})
       } else {
         container = _render(element, renderer.root)
+        renderer.once(CliRenderEvents.DESTROY, cleanup)
       }
     },
 
