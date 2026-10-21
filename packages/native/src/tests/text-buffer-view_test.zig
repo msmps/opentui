@@ -1420,52 +1420,6 @@ test "TextBufferView word wrapping - fragmented ASCII CJK transition is a bounda
     try std.testing.expectEqualSlices(u32, &.{ 5, 2 }, view.getCachedLineInfo().line_width_cols);
 }
 
-test "TextBufferView word wrapping - combining mark keeps base class across chunks" {
-    var pools = TestPools.init(std.testing.allocator);
-    defer pools.deinit();
-
-    var tb = try TextBuffer.init(std.testing.allocator, &pools.graphemes, &pools.links, .unicode);
-    defer tb.deinit();
-    var view = try TextBufferView.init(std.testing.allocator, tb);
-    defer view.deinit();
-
-    const text = "a\u{0301}日本";
-    const mem_id = try tb.registerMemBuffer(text, false);
-    var segments: std.ArrayListUnmanaged(seg_mod.Segment) = .empty;
-    defer segments.deinit(std.testing.allocator);
-    try segments.append(std.testing.allocator, .{ .linestart = {} });
-    try segments.append(std.testing.allocator, .{ .text = tb.createChunk(mem_id, 0, 3) });
-    try segments.append(std.testing.allocator, .{ .text = tb.createChunk(mem_id, 3, @intCast(text.len)) });
-    try tb.rope().setSegments(segments.items);
-
-    view.setWrapMode(.word);
-    view.setWrapWidth(4);
-    // "a\u{0301}日" fills the first line; the CJK run may break between characters.
-    try std.testing.expectEqualSlices(u32, &.{ 3, 2 }, view.getCachedLineInfo().line_width_cols);
-}
-
-test "TextBufferView word wrapping - appended kana combining mark keeps trailing bytes" {
-    var pools = TestPools.init(std.testing.allocator);
-    defer pools.deinit();
-
-    var tb = try TextBuffer.init(std.testing.allocator, &pools.graphemes, &pools.links, .unicode);
-    defer tb.deinit();
-    var view = try TextBufferView.init(std.testing.allocator, tb);
-    defer view.deinit();
-
-    try tb.setText("か");
-    try tb.append("\u{3099}く");
-    view.setWrapMode(.word);
-    view.setWrapWidth(8);
-
-    const expected = "か\u{3099}く";
-    var bytes: usize = 0;
-    for (view.getVirtualLines()) |vline| {
-        for (vline.chunks.items) |chunk| bytes += chunk.byte_len;
-    }
-    try std.testing.expectEqual(expected.len, bytes);
-}
-
 test "TextBufferView word wrapping - CJK run wraps between characters" {
     var pools = TestPools.init(std.testing.allocator);
     defer pools.deinit();
@@ -1559,6 +1513,8 @@ test "TextBufferView word wrapping - CJK policy retains bytes and uses legacy fi
         .{ .parts = &.{ "\u{65e5}\u{672c}\u{1f44b}", "\u{1f3fb}\u{8a9e}\u{6587}" }, .width = 4, .widths = &.{ 4, 4, 4 } },
         .{ .parts = &.{ "\u{65e5}\u{672c}\u{1f44b}", "\u{1f3fb}" ++ ("\u{8a9e}\u{6587}" ** 256) ++ "\u{65e5}", "abc" }, .width = 4, .widths = &(([_]u32{4} ** 258) ++ [_]u32{ 2, 3 }) },
         .{ .parts = &.{ "\u{304b}", "\u{3099}\u{304f}" }, .width = 8, .widths = &.{4} },
+        .{ .parts = &.{ "a\u{301}", "\u{65e5}\u{672c}" }, .width = 4, .widths = &.{ 3, 2 } },
+        .{ .parts = &.{ "xa ", "\u{e33}x" }, .width = 3, .widths = &.{ 3, 2 } },
         .{ .parts = &.{ "\u{306f}", "\u{309a}\u{3072}" }, .width = 8, .widths = &.{4} },
         .{ .parts = &.{"\u{304b}\u{200d}\u{3099}"}, .width = 8, .widths = &.{2} },
         .{ .parts = &.{"\u{306f}\u{200d}\u{309a}"}, .width = 8, .widths = &.{2} },
@@ -1586,8 +1542,9 @@ test "TextBufferView word wrapping - CJK policy retains bytes and uses legacy fi
                 actual.clearRetainingCapacity();
                 for (view.getVirtualLines()) |line| {
                     for (line.chunks.items) |chunk| {
-                        const bytes = chunk.chunk.getBytes(tb.memRegistry());
-                        try actual.appendSlice(std.testing.allocator, bytes[chunk.byte_start_in_chunk..][0..chunk.byte_len]);
+                        const bytes = chunk.chunk.getBytes(tb.memRegistry())[chunk.byte_start_in_chunk..][0..chunk.byte_len];
+                        try std.testing.expectEqual(chunk.width_cols, @import("../utf8.zig").calculateTextWidth(bytes, tb.tabWidth(), tb.controlDisplay(), false, method));
+                        try actual.appendSlice(std.testing.allocator, bytes);
                     }
                 }
                 try std.testing.expectEqualStrings(expected, actual.items);
@@ -4736,13 +4693,30 @@ test "TextBufferView word wrap keeps zero-width pieces with the text before them
         .{ .pieces = &.{ "x", "\u{301}cd" }, .width = 1 },
         // A zero-width piece after a full line joins it.
         .{ .pieces = &.{ "abc", "\u{301}", "-" }, .width = 1 },
+        // A mark that starts a chunk stays with the glyph before it when the next word wraps.
+        .{ .pieces = &.{ "xa ", "\u{301}x" }, .width = 3 },
+        .{ .pieces = &.{ "xa ", "\u{301}\u{308}x y" }, .width = 3 },
+        .{ .pieces = &.{ "xa ", "\u{301}", "x" }, .width = 3 },
+        .{ .pieces = &.{ "\u{4e2d} ", "\u{301}\u{6587}" }, .width = 3 },
+        .{ .pieces = &.{ "ab", "\u{301}cd" }, .width = 2 },
+        // After a tab or a zero-width space the next chunk starts a grapheme, so it wraps with the word.
+        .{ .pieces = &.{ "a\t", "\u{301}x" }, .width = 3 },
+        .{ .pieces = &.{ "xa ", "\u{200b}x" }, .width = 3 },
+        .{ .pieces = &.{ "xa \u{200d}", "\u{301}x" }, .width = 3 },
+        .{ .pieces = &.{ "xa ", "\u{200d}\u{301}x" }, .width = 3 },
+        .{ .pieces = &.{ "a\t", "\u{301}", "\u{308}x" }, .width = 3 },
+        // Only the grapheme that continues the previous chunk stays; text after the next break wraps with its word.
+        .{ .pieces = &.{ "xa ", "\u{301}\u{200b}\u{308}x" }, .width = 3 },
+        .{ .pieces = &.{ "xa ", "\u{301}\u{2060}x" }, .width = 3 },
+        // A grapheme never continues across a line break.
+        .{ .pieces = &.{ "a\n\u{301}", "\u{200b}x" }, .width = 3 },
     };
-    for (rows) |row| {
-        const tb = try TextBuffer.init(std.testing.allocator, &pools.graphemes, &pools.links, .unicode);
+    for (std.enums.values(@import("../utf8.zig").WidthMethod)) |method| for (rows) |row| for ([_]text_buffer_view.WrapMode{ .word, .char }) |mode| {
+        const tb = try TextBuffer.init(std.testing.allocator, &pools.graphemes, &pools.links, method);
         defer tb.deinit();
         for (row.pieces) |piece| try tb.append(piece);
-        try expectSameWrap(tb, row.width, .word);
-    }
+        try expectSameWrap(tb, row.width, mode);
+    };
 
     // A line of only zero-width text keeps its bytes, as it does without wrapping.
     const tb = try TextBuffer.init(std.testing.allocator, &pools.graphemes, &pools.links, .unicode);
