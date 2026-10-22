@@ -2314,7 +2314,7 @@ test "EditorView - cursor moves, backspace, and delete step over zero-width clus
     // U+FFFD ends an Indic conjunct or emoji ZWJ sequence, so the characters after it do not join across it.
     // The last text starts with 16 ASCII bytes, so layout takes its vector path.
     // Each "|" starts a new insert, and so a new chunk: a zero-width cluster can start a line or a chunk.
-    const texts = [_][]const u8{ "a\u{200b}b", "a\u{feff}\u{2060}b", "a\x07\u{301}b", "\x1b\u{200d}\x1b", "日\u{fffd}", "क्\u{fffd}\u{301}ष", "👩\u{200d}\u{fffd}\u{200d}👩", "ab\x0c-defgh\x07ij-kl\x00m-n\x1b", "\u{200b}ab", "\u{200d}\u{301}日b", "\u{feff}ab", "ab|\u{301}cd", "ab|\u{200b}\u{2060}cd" };
+    const texts = [_][]const u8{ "a\u{200b}b", "a\u{feff}\u{2060}b", "a\u{e0041}\u{200e}b", "a\x07\u{301}b", "\x1b\u{200d}\x1b", "日\u{fffd}", "क्\u{fffd}\u{301}ष", "👩\u{200d}\u{fffd}\u{200d}👩", "ab\x0c-defgh\x07ij-kl\x00m-n\x1b", "\u{200b}ab", "\u{200d}\u{301}日b", "\u{feff}ab", "ab|\u{301}cd", "ab|\u{200b}\u{2060}cd" };
     for (std.enums.values(utf8.WidthMethod)) |width_method| {
         for (texts) |text| {
             for ([_]bool{ false, true }) |forward| {
