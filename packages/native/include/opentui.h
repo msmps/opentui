@@ -7,11 +7,11 @@
 extern "C" {
 #endif
 
-/* Experimental context and session ABI, version 1. This header does not stabilize the
+/* Experimental context and session ABI, version 2. This header does not stabilize the
  * library's legacy renderer, Yoga, or other FFI exports. Use matching headers
  * and artifacts. The restricted scene surface supports roots, boxes, plain text,
  * sliders, standard arrows, editor views, and images. */
-#define OT_CONTEXT_ABI_VERSION UINT32_C(1)
+#define OT_CONTEXT_ABI_VERSION UINT32_C(2)
 
 typedef int32_t ot_status;
 #define OT_OK INT32_C(0)
@@ -454,7 +454,6 @@ typedef struct ot_scene_cursor_state {
 #define OT_SCENE_FRAME_RESIZE UINT32_C(2)
 #define OT_SCENE_FRAME_LAYOUT_CHANGED UINT32_C(3)
 #define OT_SCENE_FRAME_RECORD UINT32_C(4)
-#define OT_SCENE_FRAME_YIELD UINT32_C(5)
 
 typedef struct ot_scene_hooks {
     uint32_t struct_size;
@@ -573,43 +572,27 @@ ot_status ot_scene_set_hooks(ot_context *, const ot_handle *node, const ot_scene
  * Native code retains its membership, destination, and storage identity. DONE
  * does not acquire a buffer lease automatically. Acquire qualified access below
  * only when needed, and explicitly commit or cancel the draft before another frame.
- * During preparation without an explicit YIELD, render, resize, buffer draw,
- * buffer borrowing, setup, and suspend reject with OT_FRAME_BUSY. Close,
- * cancellation, root destruction, and owner teardown invalidate preparation
- * attempts. At an explicit YIELD, an accepted dimension change cancels the
- * attempt; rejection preserves it. Suspension validates terminal phase first
- * and cancels only a preparation/feedback YIELD, without discarding admitted output.
+ * During preparation, render, resize, buffer draw, buffer borrowing, setup, and
+ * suspend reject with OT_FRAME_BUSY. Close, cancellation, root destruction, and
+ * owner teardown invalidate preparation attempts.
  * After DONE, destroying nodes or the root leaves painted cells and capture intact
  * without repainting. Commit, frame or Session cancellation, and owner teardown
  * still end draft access.
  *
- * Painting never yields. max_work_items is a positive quota for preparation node
- * visits, candidate-view preparation, and feedback records. Hook replies clamp
- * remaining work without replenishing it; an exact YIELD reply starts another work
- * quota. Zero rejects without consuming a request. A mutation accepted at a YIELD
- * that dirties preparation restarts it once; the rest of the attempt, including
- * later hook replies, runs without yields, so steady mutations cannot exhaust
- * max_layout_rounds.
- * YIELD names the root and requires the exact returned ticket; num, width,
- * height, and hook_generation are zero. It grants no buffer access or commit
- * authority and does not count against max_host_requests. Request IDs increase
- * across both hooks and YIELD. UINT32_MAX selects synchronous preparation only on
- * begin or an exact YIELD reply. A hook reply cannot switch an already-bounded run
- * to uncharged preparation. The quota bounds counted work items, not cells or
- * elapsed time. Yoga, allocation/reservation, final paint-list preparation and
- * publication, painting, and output encoding remain synchronous.
+ * Preparation and painting never yield: each step runs until it returns a host
+ * request, DONE, or an error.
  *
  * Geometry observations are produced after phase publication.
  * Geometry is not ticket authority and must not be echoed in acknowledgements.
  * Each flag marks a valid snapshot; absent snapshots are zeroed, including for
- * RECORD, DONE, and YIELD. Observation failures do not fail the step: a caller
+ * RECORD and DONE. Observation failures do not fail the step: a caller
  * needing that observation must use the checked layout query.
  * Accepted mutations may invalidate these snapshots before the next step.
  * out_geometry requires exact size/version and zero reserved before advancement.
  * All buffers are borrowed only for this call. previous may alias out_request;
  * the two output records must be distinct. */
 ot_status ot_scene_frame_step_with_geometry(ot_context *, const ot_handle *session,
-    const ot_scene_frame_request *previous, const ot_scene_frame_options *, uint32_t max_work_items,
+    const ot_scene_frame_request *previous, const ot_scene_frame_options *,
     const uint8_t *recording, uint32_t recording_length,
     ot_scene_frame_request *out_request, ot_scene_frame_geometry *out_geometry);
 /* Copy the slots of the exact pending RECORD request. out_count receives the total
@@ -2286,7 +2269,7 @@ typedef struct ot_input_drain {
 } ot_input_drain;
 
 /* Zero-initialize, then set struct_size to sizeof(ot_context_options) and
- * abi_version to OT_CONTEXT_ABI_VERSION. Version 1 requires the exact size,
+ * abi_version to OT_CONTEXT_ABI_VERSION. Version 2 requires the exact size,
  * zero flags, zero reserved fields, and positive resource limits.
  * object_capacity is the initial count of native object slots, not bytes. A full
  * table doubles, up to 4194304 slots or object_capacity, whichever is larger;
@@ -2364,7 +2347,7 @@ ot_status ot_context_destroy(ot_context *context);
 ot_status ot_context_get_last_error(ot_context *context, ot_context_error *out_error);
 
 /* Copy up to capacity records in arrival order without allocation or callbacks.
- * Version 1 C contexts hold at most 64 records and drop newest on overflow.
+ * Version 2 C contexts hold at most 64 records and drop newest on overflow.
  * records may be NULL only when capacity is zero. A zero-capacity drain reports
  * queue pressure without removing records. out_drain must have the exact size
  * and version. The caller owns both outputs for the call. Outputs and queued

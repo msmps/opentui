@@ -883,8 +883,7 @@ test "Context shared text ABI records a text view in place of the native body" {
     var geometry = std.mem.zeroes(c.ot_scene_frame_geometry);
     geometry.struct_size = @sizeOf(c.ot_scene_frame_geometry);
     geometry.abi_version = c.OT_CONTEXT_ABI_VERSION;
-    const unlimited = std.math.maxInt(u32);
-    try std.testing.expectEqual(c.OT_OK, abi.ot_scene_frame_step_with_geometry(&owner, &session, null, &config, unlimited, null, 0, &frame, &geometry));
+    try std.testing.expectEqual(c.OT_OK, abi.ot_scene_frame_step_with_geometry(&owner, &session, null, &config, null, 0, &frame, &geometry));
     try std.testing.expectEqual(c.OT_SCENE_FRAME_RECORD, frame.kind);
     var slot: c.ot_scene_paint_slot = undefined;
     var count: u32 = 0;
@@ -896,8 +895,8 @@ test "Context shared text ABI records a text view in place of the native body" {
         .slot = .{ .header = .{ .size = @sizeOf(c.ot_scene_record_slot), .operation = c.OT_SCENE_RECORD_SLOT }, .slot = 0, .phase = c.OT_SCENE_RECORD_PHASE_SELF },
         .view = .{ .header = .{ .size = @sizeOf(c.ot_scene_record_view), .operation = c.OT_SCENE_RECORD_TEXT_VIEW }, .source = abi.handleToC(view_id), .x = 1, .y = 0 },
     };
-    try std.testing.expectEqual(c.OT_INVALID_ARGUMENT, abi.ot_scene_frame_step_with_geometry(&owner, &session, &frame, &config, unlimited, null, 1, &frame, &geometry));
-    try std.testing.expectEqual(c.OT_OK, abi.ot_scene_frame_step_with_geometry(&owner, &session, &frame, &config, unlimited, std.mem.asBytes(&recording), @sizeOf(Recording), &frame, &geometry));
+    try std.testing.expectEqual(c.OT_INVALID_ARGUMENT, abi.ot_scene_frame_step_with_geometry(&owner, &session, &frame, &config, null, 1, &frame, &geometry));
+    try std.testing.expectEqual(c.OT_OK, abi.ot_scene_frame_step_with_geometry(&owner, &session, &frame, &config, std.mem.asBytes(&recording), @sizeOf(Recording), &frame, &geometry));
     try std.testing.expectEqual(c.OT_SCENE_FRAME_DONE, frame.kind);
     const cells = (try owner.core.raw().getSessionRenderer(session_id)).getNextBuffer();
     try std.testing.expectEqual(@as(u32, ' '), cells.get(0, 0).?.char);

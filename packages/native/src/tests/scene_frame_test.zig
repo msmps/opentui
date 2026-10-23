@@ -30,7 +30,7 @@ fn drain(owner: *context.Context, id: context.Handle) !void {
     return error.TestUnexpectedResult;
 }
 
-test "Scene frame authority checks every field in layout update record paint and work phases" {
+test "Scene frame authority checks every field in layout update record and paint phases" {
     const owner = try context.Context.init(testing.allocator, testing.io, .{});
     defer owner.deinit() catch unreachable;
     const peer = try context.Context.init(testing.allocator, testing.io, .{});
@@ -48,14 +48,12 @@ test "Scene frame authority checks every field in layout update record paint and
         try owner.sceneMoveNode(child, root, @intCast(index));
         if (index == 0) try owner.sceneSetHooks(child, 59, 1, 0, 0);
     }
-    var seen = [_]bool{false} ** 6;
-    var work_yield = false;
+    var seen = [_]bool{false} ** 5;
     var previous: ?scene.FrameRequest = null;
     for (0..128) |_| {
         const recording: ?[]const u8 = if (previous != null and previous.?.kind == c.OT_SCENE_FRAME_RECORD) &.{} else null;
-        const request = try owner.sceneFrameStepWithRecording(id, previous, options, 1, recording);
+        const request = try owner.sceneFrameStepWithRecording(id, previous, options, recording);
         seen[request.kind] = true;
-        if (request.kind == c.OT_SCENE_FRAME_YIELD) work_yield = true;
         try testing.expectError(error.WrongSession, owner.sceneFrameAcquireBufferLease(other, request, .next));
         try testing.expectError(error.WrongContext, peer.sceneFrameAcquireBufferLease(foreign, request, .next));
         try testing.expectError(error.WrongContext, peer.sceneFrameCommit(foreign, request, true));
@@ -69,7 +67,7 @@ test "Scene frame authority checks every field in layout update record paint and
             const expected = if (comptime std.mem.eql(u8, field.name, "session")) error.WrongSession else error.StaleFrame;
             try testing.expectError(expected, owner.sceneFrameAcquireBufferLease(id, forged, .next));
             try testing.expectError(expected, owner.sceneFrameCommit(id, forged, true));
-            try testing.expectError(expected, owner.sceneFrameStepWorkBudgeted(id, forged, options, 1));
+            try testing.expectError(expected, owner.sceneFrameStep(id, forged, options));
         }
         var wrong_context = request;
         wrong_context.session.context_id += 1;
@@ -93,7 +91,6 @@ test "Scene frame authority checks every field in layout update record paint and
         previous = request;
     } else return error.TestUnexpectedResult;
     for (seen) |visited| try testing.expect(visited);
-    try testing.expect(work_yield);
 }
 
 test "Scene frame resize retires storage without replacing painted tickets" {
@@ -129,7 +126,7 @@ test "Scene frame record requests reject resize until the recording is submitted
     const request = try f.step(null, options, c.OT_SCENE_FRAME_RECORD, null);
     try testing.expectError(error.FrameBusy, f.owner.resizeSessionRenderer(f.id, 5, 1));
     try testing.expectError(error.StaleFrame, f.owner.sceneFrameAcquireBufferLease(f.id, request, .next));
-    const done = try f.owner.sceneFrameStepWithRecording(f.id, request, options, std.math.maxInt(u32), &.{});
+    const done = try f.owner.sceneFrameStepWithRecording(f.id, request, options, &.{});
     try testing.expectEqual(@as(u32, c.OT_SCENE_FRAME_DONE), done.kind);
     try f.owner.sceneFrameCancel(f.id, done.frame_id);
 }
@@ -148,7 +145,7 @@ test "Scene frame cancellation revokes painted authority but pins scratch cells 
         try f.owner.sceneSetPaint(child, .{ .translateX = 1 });
         const pending = if (hooked_frame) try hooked(f.owner, f.id) else null;
         var frame = try f.step(null, options, if (hooked_frame) c.OT_SCENE_FRAME_RECORD else c.OT_SCENE_FRAME_DONE, null);
-        if (hooked_frame) frame = try f.owner.sceneFrameStepWithRecording(f.id, frame, options, std.math.maxInt(u32), &.{});
+        if (hooked_frame) frame = try f.owner.sceneFrameStepWithRecording(f.id, frame, options, &.{});
         const lease = try f.owner.sceneFrameAcquireBufferLease(f.id, frame, .next);
         const snapshot = try f.owner.bufferLeaseSnapshot(lease);
         snapshot.buffer.char[0] = 'Z';

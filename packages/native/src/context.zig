@@ -1030,18 +1030,14 @@ pub const Context = struct {
         defer self.mutating = false;
         const value = try self.getSession(handle);
         try value.checkResizing();
-        const yielded = if (value.scene) |owned| owned.isYielded() else false;
-        if (!yielded) try value.checkLayoutIdle();
+        try value.checkLayoutIdle();
         const attached = value.renderer orelse return error.RendererNotAttached;
         const cells = std.math.mul(u32, width, height) catch return error.InvalidDimensions;
         if (width == 0 or height == 0 or cells > self.render_cells_max) return error.InvalidDimensions;
         // Only a pending frame depends on geometry; the renderer rejects it.
         std.debug.assert((value.frame_end_offset != null) == (attached.pendingPresentation != null));
-        const changed = attached.width != width or attached.height != height;
         try attached.resize(width, height);
-        if (yielded and changed) {
-            value.cancelSceneFrame();
-        } else if (value.scene) |owned| owned.requalifyPainted(attached);
+        if (value.scene) |owned| owned.requalifyPainted(attached);
     }
 
     pub fn writeSession(self: *Context, handle: Handle, bytes: []const u8) Error!void {
@@ -2831,20 +2827,16 @@ pub const Context = struct {
             .excluded_hit_num = excluded_hit_num,
             .max_layout_rounds = 8,
             .max_host_requests = 65536,
-        }, false);
+        }, false, null);
         std.debug.assert(result.kind == api.OT_SCENE_FRAME_DONE);
         return result;
     }
 
     pub fn sceneFrameStep(self: *Context, session_handle: Handle, previous: ?scene.FrameRequest, options: scene.FrameOptions) !scene.FrameRequest {
-        return self.sceneFrameStepWithRecording(session_handle, previous, options, std.math.maxInt(u32), null);
+        return self.sceneFrameStepWithRecording(session_handle, previous, options, null);
     }
 
-    pub fn sceneFrameStepWorkBudgeted(self: *Context, session_handle: Handle, previous: ?scene.FrameRequest, options: scene.FrameOptions, max_work_items: u32) !scene.FrameRequest {
-        return self.sceneFrameStepWithRecording(session_handle, previous, options, max_work_items, null);
-    }
-
-    pub fn sceneFrameStepWithRecording(self: *Context, session_handle: Handle, previous: ?scene.FrameRequest, options: scene.FrameOptions, max_work_items: u32, recording: ?[]const u8) !scene.FrameRequest {
+    pub fn sceneFrameStepWithRecording(self: *Context, session_handle: Handle, previous: ?scene.FrameRequest, options: scene.FrameOptions, recording: ?[]const u8) !scene.FrameRequest {
         try self.beginMutation();
         defer self.mutating = false;
         const value = try self.getSession(session_handle);
@@ -2854,7 +2846,7 @@ pub const Context = struct {
         const owned = value.scene orelse return error.SceneNotAttached;
         if (value.frame_end_offset != null or attached.pendingPresentation != null) return error.PresentationPending;
         if (attached.width > std.math.maxInt(i32) or attached.height > std.math.maxInt(i32)) return error.InvalidDimensions;
-        return owned.frameStepWorkBudgeted(self, attached, previous, options, true, max_work_items, recording);
+        return owned.frameStep(self, attached, previous, options, true, recording);
     }
 
     pub fn sceneFramePaintSlots(self: *Context, session_handle: Handle, frame: scene.FrameRequest) ![]const scene.PaintSlot {

@@ -652,14 +652,12 @@ pub const Session = struct {
 
     pub fn suspendTerminal(self: *Session) Error!void {
         try self.checkOpen();
-        const preparation_yielded = if (self.scene) |owned| owned.isYielded() else false;
-        if (!preparation_yielded) try self.checkLayoutIdle();
+        try self.checkLayoutIdle();
         switch (self.lifecycle.phase) {
             .suspending, .suspended => return,
             .active => {},
             else => return error.InvalidTerminalState,
         }
-        if (preparation_yielded) self.cancelSceneFrame();
         const value = self.renderer.?;
         value.terminalSuspended = true;
         value.cancelKittyImageTransport(false);

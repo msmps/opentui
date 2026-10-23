@@ -138,8 +138,6 @@ export interface KittyImageTransportStatus {
 export interface CliRendererConfig {
   /** Transfer this driver's ownership after attachment succeeds. Requires the same stdout. */
   nativeSession?: NativeSession
-  /** Opt-in native preparation/feedback items per turn. Yoga, painting, and encoding remain synchronous. */
-  nativeSceneWorkBudget?: number
   // Read input from this stream. Defaults to process.stdin. Any `Readable`
   // works; capabilities like `setRawMode` are duck-typed and used when present.
   stdin?: NodeJS.ReadStream
@@ -1247,9 +1245,8 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     this._usesProcessStdout = stdout === process.stdout
     this.realStdoutWrite = stdout.write
 
-    const workBudget = config.nativeSceneWorkBudget
-    if (workBudget !== undefined && (!Number.isInteger(workBudget) || workBudget <= 0 || workBudget > 0xffff_ffff)) {
-      throw new Error("nativeSceneWorkBudget must be a positive u32")
+    if ((config as { nativeSceneWorkBudget?: unknown }).nativeSceneWorkBudget !== undefined) {
+      throw new Error("nativeSceneWorkBudget was removed: frames always paint synchronously")
     }
     this.kittyTransportMode = config.kittyImageTransport ?? "raw"
     const transportCode = KITTY_IMAGE_TRANSPORTS.indexOf(this.kittyTransportMode)
@@ -1317,7 +1314,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
           this.releaseStreamLease()
         })
       void this.nativeClosed.catch(() => {})
-      this.nativeScene = new NativeScene(this.nativeSession, this, config.nativeSceneWorkBudget)
+      this.nativeScene = new NativeScene(this.nativeSession, this)
       this.nativeSession.setKittyImageTransport(transportCode)
     } catch (error) {
       // A supplied Session transfers only after attachRenderer succeeds.
@@ -4111,10 +4108,6 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       )
     }
 
-    if (nextGeometry.renderWidth !== this.width || nextGeometry.renderHeight !== this.height) {
-      this.nativeScene.restartPaint()
-    }
-
     this._terminalWidth = width
     this._terminalHeight = height
     this._splitHeight = nextGeometry.effectiveFooterHeight
@@ -4472,7 +4465,6 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     this._controlState = RendererControlState.EXPLICIT_SUSPENDED
     this._cancelPaletteDetection?.(new Error("Cannot detect palette while renderer is suspended"))
     this.resolveXtVersionWaiters()
-    this.nativeScene.interruptPaint()
     this.halt(false)
 
     this.clearSplitStartupCursorSeed()
@@ -4918,12 +4910,11 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       const sceneStart = performance.now()
       const requestedBeforeScene = this.immediateRerenderRequested
       try {
-        const painting = this.nativeScene.paint(deltaTime, () => ({
+        this.nativeScene.paint(deltaTime, () => ({
           background: this.backgroundColor,
           useMouse: this._useMouse,
           excludedHitNum: this.capturedRenderable?.num ?? 0,
         }))
-        if (painting) await painting
       } catch (error) {
         // Failed feedback must not schedule its own retry. The error handler can request one explicitly.
         this.immediateRerenderRequested = requestedBeforeScene

@@ -408,7 +408,6 @@ export enum NativeSceneFrame {
   Resize = nativeConstants.OT_SCENE_FRAME_RESIZE,
   LayoutChanged = nativeConstants.OT_SCENE_FRAME_LAYOUT_CHANGED,
   Record = nativeConstants.OT_SCENE_FRAME_RECORD,
-  Yield = nativeConstants.OT_SCENE_FRAME_YIELD,
 }
 
 export enum NativeScenePaintPhase {
@@ -1314,7 +1313,7 @@ function encodeDrawColors(
   return background !== undefined
 }
 
-const DIAGNOSTIC_QUEUE_MAX = 64 // Version 1 C Contexts hold at most 64 diagnostic records.
+const DIAGNOSTIC_QUEUE_MAX = 64 // Version 2 C Contexts hold at most 64 diagnostic records.
 const DIAGNOSTIC_BATCH = 8 // Eight 4 KiB records keep the cached drain storage near 33 KB.
 
 function createDiagnosticDrainRecord() {
@@ -7606,7 +7605,6 @@ export class FFIRenderLib {
     session: SessionHandle,
     previous: NativeSceneFrameRequest | null,
     options: NativeSceneFrameOptions,
-    maxWorkItems?: number,
     recording: Uint8Array | null = null,
   ): NativeSceneFrameRequest {
     const layout = nativeLayouts.ot_scene_frame_options
@@ -7635,8 +7633,6 @@ export class FFIRenderLib {
         options.preserveUnwritten ?? false,
         "Scene preserve unwritten cells",
       )
-      const workBudget = maxWorkItems === undefined ? 0xffffffff : toSafeFFIU32Length(maxWorkItems, "Scene work budget")
-      if (workBudget === 0) throw new RangeError("Scene work budget must be positive")
       const recordingLength = recording === null ? 0 : toSafeFFIU32Length(recording.byteLength, "Scene recording")
       const recordingView = recordingLength === 0 ? null : recording
       const output = encodeSceneFrameRequest(context, previous, scratch)
@@ -7652,7 +7648,6 @@ export class FFIRenderLib {
           previous === null ? null : output,
           config,
           output,
-          workBudget,
           recordingView,
           recordingLength,
           geometry,
@@ -7665,7 +7660,6 @@ export class FFIRenderLib {
             handle,
             previous === null ? null : output,
             config,
-            workBudget,
             recordingView,
             recordingLength,
             output,
@@ -7721,7 +7715,6 @@ export class FFIRenderLib {
     previous: BigUint64Array | null,
     config: Uint32Array,
     output: BigUint64Array,
-    workBudget: number,
     recording: Uint8Array | null,
     recordingLength: number,
     geometry: Uint32Array,
@@ -7736,7 +7729,6 @@ export class FFIRenderLib {
             handle,
             previous,
             config,
-            workBudget,
             recording,
             recordingLength,
             output,
