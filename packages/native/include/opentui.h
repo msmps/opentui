@@ -413,6 +413,19 @@ typedef struct ot_scene_layout {
     double screen_y;
 } ot_scene_layout;
 
+#define OT_SCENE_FULL_PATH_FORCED UINT32_C(1)
+#define OT_SCENE_FULL_PATH_SCREEN UINT32_C(2)
+#define OT_SCENE_FULL_PATH_IMAGES UINT32_C(4)
+
+/* Fields from work_frame_id on count the work of the last presented scene
+ * frame: preparation, paint, encoding, and the hit-grid commit. They are
+ * deterministic work counts, not times, and their values may change between
+ * versions as the renderer does less work. Cancelled, failed, and skipped frames,
+ * non-scene renders, and snapshot-only split renders leave them unchanged.
+ * work_frame_id is the frame_id of the counted frame, or zero before the first.
+ * full_path_reasons holds OT_SCENE_FULL_PATH_* bits: FORCED (debug flag),
+ * SCREEN (forced, invalidated, or palette-changed encode), IMAGES
+ * (image placements present). */
 typedef struct ot_scene_stats {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -425,6 +438,28 @@ typedef struct ot_scene_stats {
     uint32_t average_cells_updated;
     uint32_t render_time_valid;
     uint32_t stdout_write_time_valid;
+    uint64_t work_frame_id;
+    uint64_t candidate_visits;
+    uint64_t paint_visits;
+    uint64_t view_preparations;
+    uint64_t geometry_reads;
+    uint64_t yoga_solves;
+    uint64_t feedback_operations;
+    uint64_t visibility_steps;
+    uint64_t viewport_child_refreshes;
+    uint64_t overlap_tests;
+    uint64_t members_painted;
+    uint64_t member_cells;
+    uint64_t cells_cleared;
+    uint64_t hit_cells_written;
+    uint64_t hit_cells_cleared;
+    uint64_t hit_cells_compared;
+    uint64_t rows_compared;
+    uint64_t rows_diffed;
+    uint32_t full_path_reasons;
+    uint32_t host_requests;
+    uint32_t layout_rounds;
+    uint32_t reserved;
 } ot_scene_stats;
 
 typedef struct ot_scene_cursor_state {
@@ -813,6 +848,18 @@ ot_status ot_scene_get_layout(ot_context *, const ot_handle *node, uint32_t obse
 ot_status ot_scene_paint(ot_context *, const ot_handle *session, const uint16_t background[4], uint32_t use_mouse, uint32_t excluded_hit_num, ot_scene_frame_request *out_frame);
 ot_status ot_scene_hit_test(ot_context *, const ot_handle *session, int32_t x, int32_t y, uint32_t *out_num);
 ot_status ot_scene_get_stats(ot_context *, const ot_handle *session, ot_scene_stats *out_stats);
+#define OT_SCENE_DEBUG_FULL_FRAME UINT32_C(1)
+/* Diagnostic switches for tests. FULL_FRAME rebuilds each frame's preparation
+ * and paint lists instead of reusing the last frame's, and every later shortcut
+ * that skips frame work also tests it; Yoga still solves only a dirty tree, and
+ * geometry is read only for nodes laid out since the last solve. Output is
+ * unchanged; only the work counts in ot_scene_stats differ, and frames report
+ * OT_SCENE_FULL_PATH_FORCED. A closed or cancelled Session returns
+ * OT_SESSION_CLOSED, a failed one OT_OUTPUT_FAILED, other bits
+ * OT_INVALID_ARGUMENT, a Session without a scene OT_INVALID_PHASE, and an active
+ * frame attempt, draft, or frame lease OT_FRAME_BUSY. Rejection keeps the flags.
+ * Flags persist for the Session. */
+ot_status ot_scene_set_debug_flags(ot_context *, const ot_handle *session, uint32_t flags);
 /* Copied renderer cursor state. Style: block=0 line=1 underline=2 default=3.
  * Colors use normalized float channels. Output requires exact size/version. */
 ot_status ot_scene_get_cursor_state(ot_context *, const ot_handle *session, ot_scene_cursor_state *out_state);

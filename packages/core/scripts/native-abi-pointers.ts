@@ -294,6 +294,7 @@ export const nativePointerPolicies = {
   ot_scene_frame_cancel: { 0: context, 1: buffer },
   ot_scene_hit_test: { 0: context, 1: buffer, 4: buffer },
   ot_scene_get_stats: { 0: context, 1: buffer, 2: buffer },
+  ot_scene_set_debug_flags: { 0: context, 1: buffer },
   ot_scene_get_cursor_state: { 0: context, 1: buffer, 2: buffer },
   ot_scene_measure_callback: { 7: { ffi: "ptr", nullable: "never", retention: "call", source: "native-address" } },
 } satisfies PointerPolicies

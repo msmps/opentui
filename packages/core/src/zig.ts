@@ -32,6 +32,7 @@ export type {
   BuildOptions,
   NativeAudioCaptureStats,
   NativeAudioStreamStats,
+  NativeFrameWork,
   NativeRenderStats,
 }
 
@@ -74,6 +75,7 @@ import type {
   AudioStats,
   BuildOptions,
   AllocatorStats,
+  NativeFrameWork,
   NativeRenderStats,
   NativeImageInfo,
 } from "./zig-structs.js"
@@ -1020,6 +1022,24 @@ const processLogLibraries: FFIRenderLib[] = []
 let globalTraceSymbols: Record<string, number[]> | null = null
 let globalFFILogPath: string | null = null
 let exitHandlerRegistered = false
+
+/** Reads the `ot_scene_stats` fields from `work_frame_id` up to `reserved`, camel-casing their names. */
+function readFrameWork(
+  layout: (typeof nativeLayouts)["ot_scene_stats"],
+  output: BigUint64Array,
+  words: Uint32Array,
+): NativeFrameWork {
+  const result: Record<string, number> = {}
+  let counting = false
+  for (const [field, { offset, type }] of Object.entries(layout.fields)) {
+    if (field === "reserved") break
+    counting ||= field === "work_frame_id"
+    if (!counting) continue
+    const name = field.replace(/_(.)/g, (_, letter: string) => letter.toUpperCase())
+    result[name] = type === "u64" ? toNumber(output[offset / 8]) : words[offset / 4]
+  }
+  return result as NativeFrameWork
+}
 
 function toNumber(value: number | bigint): number {
   return typeof value === "bigint" ? Number(value) : value
@@ -7859,6 +7879,14 @@ export class FFIRenderLib {
     return output[0]
   }
 
+  /** @internal Tests set this through `createTestRenderer({ nativeSceneFullFrame })`. */
+  public sceneSetDebugFlags(context: NativeContextHandle, session: SessionHandle, flags: number): void {
+    const handle = encodeContextHandle(context, session)
+    const value = toSafeFFIU32Length(flags, "Scene debug flags")
+    const pointer = this.nativeContextPointer(context, "ot_scene_set_debug_flags")
+    nativeResult("ot_scene_set_debug_flags", this.opentui.symbols.ot_scene_set_debug_flags(pointer, handle, value))
+  }
+
   public sceneGetStats(context: NativeContextHandle, session: SessionHandle): NativeRenderStats {
     const layout = nativeLayouts.ot_scene_stats
     const handle = encodeContextHandle(context, session)
@@ -7883,6 +7911,7 @@ export class FFIRenderLib {
         words[layout.fields.stdout_write_time_valid.offset / 4] !== 0
           ? times[layout.fields.stdout_write_time.offset / 8]
           : undefined,
+      frameWork: readFrameWork(layout, output, words),
     }
   }
 

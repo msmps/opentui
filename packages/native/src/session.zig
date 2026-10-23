@@ -386,7 +386,7 @@ pub const Session = struct {
         if (self.scene) |owned| {
             if (owned.cancelled_paint) return error.StaleFrame;
         }
-        return self.renderReady(force, null);
+        return self.renderReady(force, null, null);
     }
 
     /// Every returned status consumes the draft, including skipped and failed.
@@ -399,7 +399,7 @@ pub const Session = struct {
         const attached = self.renderer orelse return error.RendererNotAttached;
         if (!painted.destination.matches(attached.getNextBuffer())) return error.StaleFrame;
         if (self.frame_end_offset != null) return error.PresentationPending;
-        const status = try self.renderReady(force, null);
+        const status = try self.renderReady(force, null, painted.work);
         owned.painted = null;
         // A failed encoder may leave scratch cells intact, but cannot authorize their replay.
         owned.cancelled_paint = status == .failed;
@@ -430,9 +430,11 @@ pub const Session = struct {
         const attached = self.renderer orelse return error.RendererNotAttached;
         if (frame == null and self.frame_end_offset != null) return .pending;
         if (snapshots.len > split_snapshots_max or pinned_render_offset > std.math.maxInt(u16)) return error.InvalidOptions;
+        var work: ?renderer.FrameWork = null;
         if (frame) |request| {
             const owned = self.scene orelse return error.SceneNotAttached;
             const painted = try owned.checkPainted(request);
+            work = painted.work;
             if (self.frame_lease_count != 0) return error.FrameBusy;
             if (!painted.destination.matches(attached.getNextBuffer())) return error.StaleFrame;
             if (self.frame_end_offset != null) return error.PresentationPending;
@@ -464,7 +466,7 @@ pub const Session = struct {
             .pinned_render_offset = pinned_render_offset,
             .paint_footer = frame != null,
             .suspended = suspended_snapshots,
-        });
+        }, work);
         if (frame != null) {
             self.scene.?.painted = null;
             self.scene.?.cancelled_paint = status == .failed;
@@ -472,8 +474,11 @@ pub const Session = struct {
         return status;
     }
 
-    fn renderReady(self: *Session, force: bool, split: ?renderer.SplitRender) Error!RenderStatus {
+    /// work is the committed scene draft's counts; it is published only if this frame presents.
+    fn renderReady(self: *Session, force: bool, split: ?renderer.SplitRender, work: ?renderer.FrameWork) Error!RenderStatus {
         const value = self.renderer orelse return error.RendererNotAttached;
+        value.scene_work = work;
+        defer value.scene_work = null;
         if (self.frame_end_offset != null) return .pending;
         const lifecycle_active = self.lifecycle.phase == .active;
         const previous_reservation = self.output.control_sequence;

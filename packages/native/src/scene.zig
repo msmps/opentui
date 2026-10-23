@@ -179,6 +179,7 @@ pub const BufferIdentity = struct {
 const Painted = struct {
     ticket: FrameRequest,
     destination: BufferIdentity,
+    work: renderer.FrameWork,
 };
 
 const Attempt = struct {
@@ -363,13 +364,11 @@ pub const Scene = struct {
     preparation_dirty: bool = true,
     // Some node failed a custom measurement or ends a retry in the next retry pass.
     measure_failed: bool = false,
-    test_prepare_steps: if (builtin.is_test) u64 else void = if (builtin.is_test) 0 else {},
-    test_geometry_reads: if (builtin.is_test) u64 else void = if (builtin.is_test) 0 else {},
-    test_style_reads: if (builtin.is_test) u64 else void = if (builtin.is_test) 0 else {},
-    test_visibility_steps: if (builtin.is_test) u64 else void = if (builtin.is_test) 0 else {},
+    // The active attempt's work; it moves into the DONE draft and dies with a cancelled attempt.
+    frame_work: renderer.FrameWork = .{},
+    // OT_SCENE_DEBUG_* bits. Every shortcut that skips frame work tests FULL_FRAME; today that is work-list reuse.
+    debug_flags: u32 = 0,
     test_sort_steps: if (builtin.is_test) u64 else void = if (builtin.is_test) 0 else {},
-    test_filtered_refresh_steps: if (builtin.is_test) u64 else void = if (builtin.is_test) 0 else {},
-    test_paint_setups: if (builtin.is_test) u64 else void = if (builtin.is_test) 0 else {},
 
     pub fn init(allocator: std.mem.Allocator, config: *yoga.Config, session: handles.Handle) !*Scene {
         const self = try allocator.create(Scene);
@@ -705,6 +704,10 @@ pub const Scene = struct {
         return self.paint_slots.items;
     }
 
+    fn forcesFullFrame(self: *const Scene) bool {
+        return self.debug_flags & api.OT_SCENE_DEBUG_FULL_FRAME != 0;
+    }
+
     pub fn requalifyPainted(self: *Scene, cli: *renderer.CliRenderer) void {
         if (self.painted) |*painted| painted.destination = BufferIdentity.init(cli.getNextBuffer());
     }
@@ -741,6 +744,10 @@ pub const Scene = struct {
                 .frame_id = frame_id,
                 .options = options,
             };
+            self.frame_work = .{
+                .work_frame_id = frame_id,
+                .full_path_reasons = if (self.forcesFullFrame()) renderer.FrameWork.full_path_forced else 0,
+            };
             self.last_frame_id = frame_id;
             self.retryFailedMeasures();
         }
@@ -750,7 +757,7 @@ pub const Scene = struct {
         }
         defer if (self.attempt != null) self.work.clearRetainingCapacity();
         const active = &self.attempt.?;
-        const reusable_work = active.request_id == 0 and self.hook_count == 0 and self.filter_count == 0;
+        const reusable_work = active.request_id == 0 and self.hook_count == 0 and self.filter_count == 0 and !self.forcesFullFrame();
         const root = if (active.root.context_id != 0) blk: {
             const value = objects.get(active.root, .native_renderable, native.NativeRenderable) catch return error.StaleFrame;
             if (self.root != value or value.scene_node == null or value.scene_node.?.owner != self) return error.StaleFrame;
@@ -773,7 +780,8 @@ pub const Scene = struct {
             var visible_member: ?*native.NativeRenderable = null;
             while (self.feedback.items.len != 0) {
                 const operation = self.feedback.pop().?;
-                if (builtin.is_test and operation.kind == .filtered_refresh) self.test_filtered_refresh_steps += 1;
+                self.frame_work.feedback_operations += 1;
+                if (operation.kind == .filtered_refresh) self.frame_work.viewport_child_refreshes += 1;
                 const value = objects.get(operation.node, .native_renderable, native.NativeRenderable) catch continue;
                 if (value.scene_node == null or value.scene_node.?.owner != self) continue;
                 const node = value.scene_node.?;
@@ -835,6 +843,7 @@ pub const Scene = struct {
                                 for (node.paint_children.items, 0..) |child, index| {
                                     const state = child.scene_node.?;
                                     if (state.prepared_frame != active.frame_id or state.prepared_round != active.rounds) continue;
+                                    self.frame_work.viewport_child_refreshes += 1;
                                     if (try self.refresh(child, true)) |request_value| {
                                         // Snapshot the remaining batch before a host callback can change siblings.
                                         var remaining = node.paint_children.items.len;
@@ -864,6 +873,7 @@ pub const Scene = struct {
                                 layout.screenX = parent_layout.screenX + @as(f64, layout.left) + state.paint.translateX;
                                 layout.screenY = parent_layout.screenY + @as(f64, layout.top) + state.paint.translateY;
                                 try validateLayout(layout);
+                                self.frame_work.overlap_tests += 1;
                                 if (!overlaps(bounds, layout)) continue;
                             }
                             self.feedback.appendAssumeCapacity(.{ .node = state.handle, .kind = .update });
@@ -923,9 +933,12 @@ pub const Scene = struct {
         self.cancelFrame();
         self.work.items = work;
         self.cancelled_paint = false;
+        self.frame_work.host_requests = active.requests;
+        self.frame_work.layout_rounds = active.rounds;
         self.painted = .{
             .ticket = done,
             .destination = BufferIdentity.init(cli.getNextBuffer()),
+            .work = self.frame_work,
         };
         return done;
     }
@@ -968,7 +981,7 @@ pub const Scene = struct {
             try yoga.check(yoga.yogaNodeStyleGetEnumChecked(value.yoga_node, api.OT_STYLE_ENUM_DISPLAY, &display));
             visible = display != api.OT_DISPLAY_NONE;
         }
-        if (visible) try prepareView(node, node.layout);
+        if (visible) try prepareView(&self.frame_work, node, node.layout);
         const result = if (changed and node.hook_flags & api.OT_SCENE_HOOK_RESIZE != 0 and visible)
             try self.request(node, api.OT_SCENE_FRAME_RESIZE)
         else
@@ -988,7 +1001,7 @@ pub const Scene = struct {
         while (cursor) |current| : (cursor = current.scene_node.?.parent) {
             if (depth == yoga.depth_max) return error.YogaDepthLimit;
             depth += 1;
-            if (builtin.is_test) self.test_visibility_steps += 1;
+            self.frame_work.visibility_steps += 1;
             var display: u32 = 0;
             try yoga.check(yoga.yogaNodeStyleGetEnumChecked(current.yoga_node, api.OT_STYLE_ENUM_DISPLAY, &display));
             if (display == api.OT_DISPLAY_NONE) return false;
@@ -1040,6 +1053,8 @@ pub const Scene = struct {
         if (!try self.needsSolve(cli, root)) return;
         const epoch = std.math.add(u64, self.layout_epoch, 1) catch return error.RequestLimit;
         try yoga.check(yoga.yogaNodeCalculateLayoutChecked(root.yoga_node, @floatFromInt(cli.width), @floatFromInt(cli.height), 1));
+        // A measurement outside a frame counts into work that the next attempt resets.
+        self.frame_work.yoga_solves += 1;
         self.layout_epoch = epoch;
         // A measurement-only solve must invalidate locals before the next prepared frame.
         self.solve_frame = frame_id;
@@ -1071,7 +1086,7 @@ pub const Scene = struct {
         for (self.work.items) |entry| {
             if (reuse and !entry.visible) continue;
             // Yoga measurement is observational; culled text keeps its last refreshed viewport.
-            if (!entry.filtered) try prepareView(entry.node.scene_node.?, entry.layout);
+            if (!entry.filtered) try prepareView(&self.frame_work, entry.node.scene_node.?, entry.layout);
         }
         if (phases) {
             // Prepass, filtered refresh, and selected updates never hold simultaneous batches for one parent.
@@ -1123,6 +1138,8 @@ pub const Scene = struct {
         cli.setBackgroundColor(options.background);
         target.clear(options.background, if (options.preserve_unwritten) 0 else null);
         @import("utils.zig").fillU32(cli.nextHitGrid, 0);
+        self.frame_work.cells_cleared += @as(u64, target.width) * target.height;
+        self.frame_work.hit_cells_cleared += cli.nextHitGrid.len;
     }
 
     fn markFocus(self: *Scene, objects: *const handles.Table) !void {
@@ -1237,7 +1254,13 @@ pub const Scene = struct {
     fn paintMember(self: *Scene, owner: *Context, cli: *renderer.CliRenderer, entry: Work, options: FrameOptions, phases: Phases) !void {
         const node = entry.node.scene_node.?;
         if (phases.hooks != 0 or node.kind != api.OT_SCENE_BOX or hasBoxPaint(&node.paint)) {
-            if (builtin.is_test) self.test_paint_setups += 1;
+            const painted = intersection(.{
+                .x = @intFromFloat(entry.layout.screenX),
+                .y = @intFromFloat(entry.layout.screenY),
+                .width = @intFromFloat(entry.layout.width),
+                .height = @intFromFloat(entry.layout.height),
+            }, entry.clip);
+            self.frame_work.member_cells += @as(u64, painted.width) * painted.height;
             const target = cli.getNextBuffer();
             // A natively composed image buffer receives its node's hook drawing, like its body.
             const surface = if (node.kind == api.OT_SCENE_IMAGE) node.control.image.buffer else null;
@@ -1251,7 +1274,8 @@ pub const Scene = struct {
             try playPhase(owner, target, surface, entry, phases, api.OT_SCENE_RECORD_PHASE_AFTER);
             if (node.kind == api.OT_SCENE_IMAGE) try finishImagePaint(target, node.control.image, entry.layout);
         }
-        addHit(cli, entry.layout, entry.clip, node.num, node.token, options);
+        self.frame_work.members_painted += 1;
+        addHit(&self.frame_work, cli, entry.layout, entry.clip, node.num, node.token, options);
     }
 
     /// Each phase starts with only the member's inherited clip and opacity.
@@ -1285,18 +1309,18 @@ pub const Scene = struct {
         const width: u32 = @intFromFloat(entry.layout.width);
         const height: u32 = @intFromFloat(entry.layout.height);
         if (node.text) |text| {
-            if (entry.filtered) try prepareView(node, entry.layout);
+            if (entry.filtered) try prepareView(&self.frame_work, node, entry.layout);
             const hit = intersection(.{ .x = x, .y = y, .width = width, .height = height }, entry.clip);
             if (hit.width != 0 and hit.height != 0) try target.drawTextBufferChecked(text.view, x, y);
         } else if (node.kind == api.OT_SCENE_TEXT_VIEW) {
             const view = node.control.text_view.view orelse return;
-            if (entry.filtered or self.preparation_dirty) try prepareView(node, entry.layout);
+            if (entry.filtered or self.preparation_dirty) try prepareView(&self.frame_work, node, entry.layout);
             if (!node.control.text_view.paint) return;
             const hit = intersection(.{ .x = x, .y = y, .width = width, .height = height }, entry.clip);
             if (hit.width != 0 and hit.height != 0) try target.drawTextBufferChecked(view.view, x, y);
         } else if (node.kind == api.OT_SCENE_EDITOR) {
             const editor = node.editor orelse return;
-            if (entry.filtered or self.preparation_dirty) try prepareView(node, entry.layout);
+            if (entry.filtered or self.preparation_dirty) try prepareView(&self.frame_work, node, entry.layout);
             const hit = intersection(.{ .x = x, .y = y, .width = width, .height = height }, entry.clip);
             if (hit.width != 0 and hit.height != 0) try target.drawEditorViewChecked(editor.view, x, y);
         } else if (node.kind == api.OT_SCENE_IMAGE) {
@@ -1419,7 +1443,7 @@ pub const Scene = struct {
         }
     }
 
-    fn addHit(cli: *renderer.CliRenderer, layout: Layout, clip: buffer.ClipRect, num: u32, token: u32, options: FrameOptions) void {
+    fn addHit(work: *renderer.FrameWork, cli: *renderer.CliRenderer, layout: Layout, clip: buffer.ClipRect, num: u32, token: u32, options: FrameOptions) void {
         if (!options.use_mouse or num == options.excluded_hit_num) return;
         const hit = intersection(.{
             .x = @intFromFloat(layout.screenX),
@@ -1427,6 +1451,8 @@ pub const Scene = struct {
             .width = @intFromFloat(layout.width),
             .height = @intFromFloat(layout.height),
         }, clip);
+        // The clip lies inside the screen and scene paint pushes no hit scissor, so the grid writes exactly this area.
+        work.hit_cells_written += @as(u64, hit.width) * hit.height;
         cli.addToHitGrid(hit.x, hit.y, hit.width, hit.height, token);
     }
 
@@ -1459,13 +1485,15 @@ pub const Scene = struct {
             const value = frame.node;
             const node = value.scene_node.?;
             if (!frame.entered) {
-                if (builtin.is_test) self.test_prepare_steps += 1;
+                switch (mode) {
+                    .candidates => self.frame_work.candidate_visits += 1,
+                    .paint => self.frame_work.paint_visits += 1,
+                }
                 // Yoga style changes dirty layout; the completed preparation stamps qualify both caches.
                 const refresh_layout = mode == .candidates and (node.prepared_frame == 0 or node.prepared_frame < self.solve_frame or
                     (node.prepared_frame == self.solve_frame and node.prepared_round < self.solve_round));
                 if (refresh_layout) {
                     var display: u32 = 0;
-                    if (builtin.is_test) self.test_style_reads += 1;
                     try yoga.check(yoga.yogaNodeStyleGetEnumChecked(value.yoga_node, api.OT_STYLE_ENUM_DISPLAY, &display));
                     node.layout_flags.display_none = display == api.OT_DISPLAY_NONE;
                 }
@@ -1478,7 +1506,7 @@ pub const Scene = struct {
                 var layout = node.layout;
                 if (refresh_layout) {
                     var computed: yoga.ExternalYogaLayout = undefined;
-                    if (builtin.is_test) self.test_geometry_reads += 1;
+                    self.frame_work.geometry_reads += 1;
                     try yoga.check(yoga.yogaNodeGetComputedLayoutChecked(value.yoga_node, &computed));
                     if (!std.math.isFinite(computed.width) or !std.math.isFinite(computed.height)) return error.InvalidDimensions;
                     layout = .{
@@ -1500,6 +1528,7 @@ pub const Scene = struct {
                 layout.screenY = frame.parent.screenY + @as(f64, layout.top) + node.paint.translateY;
                 try validateLayout(layout);
                 if (frame.filter) |filter| {
+                    self.frame_work.overlap_tests += 1;
                     if (!overlaps(filter, layout)) {
                         depth -= 1;
                         continue;
@@ -1516,7 +1545,6 @@ pub const Scene = struct {
                 frame.parent = layout;
                 if (refresh_layout) {
                     var overflow: u32 = 0;
-                    if (builtin.is_test) self.test_style_reads += 1;
                     try yoga.check(yoga.yogaNodeStyleGetEnumChecked(value.yoga_node, api.OT_STYLE_ENUM_OVERFLOW, &overflow));
                     node.layout_flags.clips_children = overflow != api.OT_OVERFLOW_VISIBLE;
                 }
@@ -1665,7 +1693,8 @@ fn composedLayout(value: *const native.NativeRenderable, comptime observed: bool
     return result;
 }
 
-fn prepareView(node: *Node, layout: Layout) !void {
+fn prepareView(work: *renderer.FrameWork, node: *Node, layout: Layout) !void {
+    work.view_preparations += 1;
     if (node.kind == api.OT_SCENE_TEXT_VIEW) {
         const text_view = node.control.text_view.view orelse return;
         var viewport = text_view.view.getViewport() orelse text_buffer_view.Viewport{ .x = 0, .y = 0, .width = 0, .height = 0 };

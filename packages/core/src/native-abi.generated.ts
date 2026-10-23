@@ -1,7 +1,7 @@
 // Generated from packages/native/include/opentui.h and scripts/native-abi-pointers.ts.
 // Run `bun run generate:abi` in packages/core. Do not edit.
 // Inspect audit input: bun scripts/native-abi.ts --audit
-// ABI audit SHA-256: 2c49153138ccbac6a2fb955da2a39ef525a81b3dab581f1a3681ce7bf716f23e
+// ABI audit SHA-256: cd36248070838608562beb6dbfe75410ad17e2e3f31ce44ad48be3de400fa042
 
 export const nativeSymbols = {
   ot_scene_set_hooks: { args: ["ptr", "buffer", "buffer"], returns: "i32" },
@@ -41,6 +41,7 @@ export const nativeSymbols = {
   ot_scene_paint: { args: ["ptr", "buffer", "buffer", "u32", "u32", "buffer"], returns: "i32" },
   ot_scene_hit_test: { args: ["ptr", "buffer", "i32", "i32", "buffer"], returns: "i32" },
   ot_scene_get_stats: { args: ["ptr", "buffer", "buffer"], returns: "i32" },
+  ot_scene_set_debug_flags: { args: ["ptr", "buffer", "u32"], returns: "i32" },
   ot_scene_get_cursor_state: { args: ["ptr", "buffer", "buffer"], returns: "i32" },
   ot_scene_frame_copy_buffer: { args: ["ptr", "buffer", "buffer", "buffer"], returns: "i32" },
   ot_scene_measure_layout: { args: ["ptr", "buffer", "buffer"], returns: "i32" },
@@ -476,7 +477,7 @@ export const nativeLayouts = {
     },
   },
   ot_scene_stats: {
-    size: 64,
+    size: 224,
     alignment: 8,
     fields: {
       struct_size: { offset: 0, size: 4, alignment: 4, type: "u32" },
@@ -490,6 +491,28 @@ export const nativeLayouts = {
       average_cells_updated: { offset: 52, size: 4, alignment: 4, type: "u32" },
       render_time_valid: { offset: 56, size: 4, alignment: 4, type: "u32" },
       stdout_write_time_valid: { offset: 60, size: 4, alignment: 4, type: "u32" },
+      work_frame_id: { offset: 64, size: 8, alignment: 8, type: "u64" },
+      candidate_visits: { offset: 72, size: 8, alignment: 8, type: "u64" },
+      paint_visits: { offset: 80, size: 8, alignment: 8, type: "u64" },
+      view_preparations: { offset: 88, size: 8, alignment: 8, type: "u64" },
+      geometry_reads: { offset: 96, size: 8, alignment: 8, type: "u64" },
+      yoga_solves: { offset: 104, size: 8, alignment: 8, type: "u64" },
+      feedback_operations: { offset: 112, size: 8, alignment: 8, type: "u64" },
+      visibility_steps: { offset: 120, size: 8, alignment: 8, type: "u64" },
+      viewport_child_refreshes: { offset: 128, size: 8, alignment: 8, type: "u64" },
+      overlap_tests: { offset: 136, size: 8, alignment: 8, type: "u64" },
+      members_painted: { offset: 144, size: 8, alignment: 8, type: "u64" },
+      member_cells: { offset: 152, size: 8, alignment: 8, type: "u64" },
+      cells_cleared: { offset: 160, size: 8, alignment: 8, type: "u64" },
+      hit_cells_written: { offset: 168, size: 8, alignment: 8, type: "u64" },
+      hit_cells_cleared: { offset: 176, size: 8, alignment: 8, type: "u64" },
+      hit_cells_compared: { offset: 184, size: 8, alignment: 8, type: "u64" },
+      rows_compared: { offset: 192, size: 8, alignment: 8, type: "u64" },
+      rows_diffed: { offset: 200, size: 8, alignment: 8, type: "u64" },
+      full_path_reasons: { offset: 208, size: 4, alignment: 4, type: "u32" },
+      host_requests: { offset: 212, size: 4, alignment: 4, type: "u32" },
+      layout_rounds: { offset: 216, size: 4, alignment: 4, type: "u32" },
+      reserved: { offset: 220, size: 4, alignment: 4, type: "u32" },
     },
   },
   ot_scene_cursor_state: {
@@ -1614,6 +1637,9 @@ export const nativeConstants = {
   OT_SCENE_TEXT_BACKGROUND: 2,
   OT_SCENE_TEXT_LINK: 4,
   OT_SCENE_MUTATIONS_MAX: 4096,
+  OT_SCENE_FULL_PATH_FORCED: 1,
+  OT_SCENE_FULL_PATH_SCREEN: 2,
+  OT_SCENE_FULL_PATH_IMAGES: 4,
   OT_SCENE_HOOK_UPDATE: 1,
   OT_SCENE_HOOK_RESIZE: 2,
   OT_SCENE_HOOK_LAYOUT_CHANGED: 4,
@@ -1643,6 +1669,7 @@ export const nativeConstants = {
   OT_SCENE_PROPERTY_RESET_BORDER_CHARACTERS: 4096,
   OT_SCENE_PROPERTY_RECORD_MAX: 88,
   OT_SCENE_PROPERTY_BYTES_MAX: 360448,
+  OT_SCENE_DEBUG_FULL_FRAME: 1,
   OT_SESSION_OPEN: 0,
   OT_SESSION_CLOSING: 1,
   OT_SESSION_CLOSED_STATE: 2,

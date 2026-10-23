@@ -2940,6 +2940,17 @@ pub const Context = struct {
         return state.num;
     }
 
+    pub fn sceneSetDebugFlags(self: *Context, session_handle: Handle, flags: u32) !void {
+        try self.beginMutation();
+        defer self.mutating = false;
+        const value = try self.getSession(session_handle);
+        try value.checkOpen();
+        const owned = value.scene orelse return error.SceneNotAttached;
+        if (flags & ~api.OT_SCENE_DEBUG_FULL_FRAME != 0) return error.InvalidOptions;
+        try value.checkFrameIdle();
+        owned.debug_flags = flags;
+    }
+
     pub fn sceneGetStats(self: *Context, session_handle: Handle) !renderer.RenderStatsSnapshot {
         try self.beginMutation();
         defer self.mutating = false;
