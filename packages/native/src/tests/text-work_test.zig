@@ -3,6 +3,7 @@
 const std = @import("std");
 const TestPools = @import("test-pools.zig").TestPools;
 const text_work = @import("../text-work.zig");
+const iter_mod = @import("../text-buffer-iterators.zig");
 const TextBuffer = @import("../text-buffer.zig").UnifiedTextBuffer;
 const text_buffer_view = @import("../text-buffer-view.zig");
 const TextBufferView = text_buffer_view.UnifiedTextBufferView;
@@ -53,21 +54,21 @@ test "text work: one edit in a 10,000-line editor lays out the whole document" {
     const rows = [_]struct { mode: WrapMode, insert: Counts, burst: Counts, measure: Counts }{
         .{
             .mode = .none,
-            .insert = .{ .layouts = 1, .lines_laid_out = 10_000, .marker_rebuilds = 1, .marker_leaves = 30_000, .marker_lookups = 8 },
-            .burst = .{ .layouts = 10, .lines_laid_out = 100_000, .marker_rebuilds = 10, .marker_leaves = 300_000, .marker_lookups = 80 },
-            // Unwrapped measure reads every line width from the markers.
-            .measure = .{ .measure_passes = 1, .measure_lines = 10_000, .marker_lookups = 19_999 },
+            .insert = .{ .layouts = 1, .lines_laid_out = 10_000, .line_seeks = 6, .line_seek_nodes = 92 },
+            .burst = .{ .layouts = 10, .lines_laid_out = 100_000, .line_seeks = 60, .line_seek_nodes = 930 },
+            // Unwrapped measure reads the widest line from the rope metrics.
+            .measure = .{ .measure_passes = 1 },
         },
         .{
             .mode = .word,
-            .insert = .{ .layouts = 1, .lines_laid_out = 10_000, .marker_rebuilds = 1, .marker_leaves = 30_000, .marker_lookups = 8, .ascii_bytes = 790_001 },
-            .burst = .{ .layouts = 10, .lines_laid_out = 100_000, .marker_rebuilds = 10, .marker_leaves = 300_000, .marker_lookups = 80, .ascii_bytes = 7_900_065 },
+            .insert = .{ .layouts = 1, .lines_laid_out = 10_000, .line_seeks = 6, .line_seek_nodes = 92, .ascii_bytes = 790_001 },
+            .burst = .{ .layouts = 10, .lines_laid_out = 100_000, .line_seeks = 60, .line_seek_nodes = 930, .ascii_bytes = 7_900_065 },
             .measure = .{ .measure_passes = 1, .measure_lines = 10_000, .ascii_bytes = 790_011 },
         },
         .{
             .mode = .char,
-            .insert = .{ .layouts = 1, .lines_laid_out = 10_000, .marker_rebuilds = 1, .marker_leaves = 30_000, .marker_lookups = 8, .prefix_seeks = 10_001 },
-            .burst = .{ .layouts = 10, .lines_laid_out = 100_000, .marker_rebuilds = 10, .marker_leaves = 300_000, .marker_lookups = 80, .prefix_seeks = 100_010 },
+            .insert = .{ .layouts = 1, .lines_laid_out = 10_000, .line_seeks = 6, .line_seek_nodes = 92, .prefix_seeks = 10_001 },
+            .burst = .{ .layouts = 10, .lines_laid_out = 100_000, .line_seeks = 60, .line_seek_nodes = 930, .prefix_seeks = 100_010 },
             .measure = .{ .measure_passes = 1, .measure_lines = 10_000, .prefix_seeks = 10_001 },
         },
     };
@@ -92,9 +93,9 @@ test "text work: one edit in a 10,000-line editor lays out the whole document" {
         try expectWork(row.burst);
         // The cursor listener laid the document out already, so the frame only draws.
         screen.drawEditorView(ev, 0, 0);
-        try expectWork(.{ .marker_lookups = 10, .clusters_drawn = 3_171 });
+        try expectWork(.{ .line_seeks = 8, .line_seek_nodes = 124, .clusters_drawn = 3_171 });
         eb.moveRight();
-        try expectWork(.{ .marker_lookups = 13, .prefix_seeks = 1, .grapheme_width_reads = 1 });
+        try expectWork(.{ .line_seeks = 11, .line_seek_nodes = 171, .prefix_seeks = 1, .grapheme_width_reads = 1 });
         _ = try ev.getTextBufferView().measureForDimensions(100, 40);
         try expectWork(row.measure);
     }
@@ -123,6 +124,46 @@ test "text work: an append measures and lays out a 5,000-line view once each" {
     _ = view.getVirtualLineCount();
     // The second measure hits the cache; render lays the document out again.
     try expectWork(.{ .layouts = 1, .lines_laid_out = 5_000, .measure_passes = 1, .measure_lines = 5_000, .ascii_bytes = 355_083 });
+}
+
+test "text work: line lookups after an edit in a 10,000-line buffer" {
+    const allocator = std.testing.allocator;
+    var pools = TestPools.init(allocator);
+    defer pools.deinit();
+    const text = try repeatLines(allocator, "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor in", 10_000);
+    defer allocator.free(text);
+
+    const eb = try EditBuffer.init(allocator, &pools.graphemes, &pools.links, .unicode, null);
+    defer eb.deinit();
+    try eb.setText(text);
+    try eb.setCursor(5_000, 3);
+    _ = text_work.take();
+    try eb.insertText("x");
+    try eb.backspace();
+    try expectWork(.{ .line_seeks = 17, .line_seek_nodes = 274, .prefix_seeks = 3 });
+    try eb.deleteForward();
+    try expectWork(.{ .line_seeks = 17, .line_seek_nodes = 267, .prefix_seeks = 3, .grapheme_width_reads = 1 });
+
+    const tb = eb.getTextBuffer();
+    try tb.append("\nappended");
+    _ = tb.lineWidthAt(10_000);
+    try expectWork(.{ .line_seeks = 1, .line_seek_nodes = 17 });
+    // A highlight seeks its first line and walks the leaves of the lines it covers.
+    try tb.addHighlightByCharRange(0, tb.getLength(), 1, 1, 0);
+    try expectWork(.{ .line_seeks = 2, .line_seek_nodes = 29, .highlight_leaves = 30_003, .line_span_builds = 10_001, .line_span_highlights = 10_001 });
+    try tb.addHighlightByCharRange(5_000 * 80 + 3, 5_000 * 80 + 9, 1, 1, 0);
+    try expectWork(.{ .line_seeks = 2, .line_seek_nodes = 30, .highlight_leaves = 3, .line_span_builds = 1, .line_span_highlights = 2 });
+
+    // Zero-width appends have no weight; balancing counts their leaves, so the depth stays logarithmic.
+    const zero_width = try TextBuffer.init(allocator, &pools.graphemes, &pools.links, .unicode);
+    defer zero_width.deinit();
+    try zero_width.setText(text);
+    for (0..200) |_| try zero_width.append("\u{200b}");
+    try std.testing.expect(zero_width.rope().root.depth() <= 2 * std.math.log2_int_ceil(u32, zero_width.rope().count()));
+    _ = text_work.take();
+    _ = zero_width.lineWidthAt(9_999);
+    _ = iter_mod.offsetToCoords(zero_width.rope(), zero_width.textEndOffset());
+    try expectWork(.{ .line_seeks = 3, .line_seek_nodes = 53 });
 }
 
 test "text work: drawing rows of a wrapped CJK line rescans its clusters from the line start" {
@@ -362,12 +403,10 @@ test "text work: highlights added one range at a time rebuild the spans of their
     const screen = try OptimizedBuffer.init(allocator, 80, 24, .{ .pool = &pools.graphemes, .link_pool = &pools.links });
     defer screen.deinit();
     screen.drawTextBuffer(view, 0, 0);
-    // Build the line markers once, so neither row pays for it.
-    try tb.addHighlightByCharRange(0, 1, 1, 1, 0);
     // 100 lines of 10 words: one range per word, alone or inside one transaction.
     const rows = [_]struct { transaction: bool, add: Counts }{
-        .{ .transaction = false, .add = .{ .marker_lookups = 23_190, .line_span_builds = 1_000, .line_span_highlights = 5_500 } },
-        .{ .transaction = true, .add = .{ .marker_lookups = 23_190, .line_span_builds = 100, .line_span_highlights = 1_000 } },
+        .{ .transaction = false, .add = .{ .line_seeks = 2_000, .line_seek_nodes = 16_600, .highlight_leaves = 2_990, .line_span_builds = 1_000, .line_span_highlights = 5_500 } },
+        .{ .transaction = true, .add = .{ .line_seeks = 2_000, .line_seek_nodes = 16_600, .highlight_leaves = 2_990, .line_span_builds = 100, .line_span_highlights = 1_000 } },
     };
     for (rows) |row| {
         errdefer std.debug.print("transaction {}\n", .{row.transaction});
