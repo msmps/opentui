@@ -2017,7 +2017,6 @@ test "renderer - 1000 frame render loop with owned styled text" {
     const fg_color = ansi.rgbaFromFloats(1.0, 0.8, 0.6, 1.0);
     const bg_color = ansi.rgbaFromFloats(0.1, 0.1, 0.2, 1.0);
     var current: ?owned_styled.Result = null;
-    defer if (current) |c| c.style.deinit();
 
     var frame: u32 = 0;
     while (frame < 1000) : (frame += 1) {
@@ -2093,7 +2092,6 @@ test "renderer - grapheme pool refcounting with frame buffer fast path" {
     const bg_color = ansi.rgbaFromFloats(0.0, 0.0, 0.0, 0.0);
 
     var current: ?owned_styled.Result = null;
-    defer if (current) |c| c.style.deinit();
     try owned_styled.replaceInPlace(tb, &current, &.{.{
         .text = "👋",
         .fg = fg_color,
