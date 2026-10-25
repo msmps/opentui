@@ -402,6 +402,8 @@ pub const Scene = struct {
     debug_flags: u32 = 0,
     test_sort_steps: if (builtin.is_test) u64 else void = if (builtin.is_test) 0 else {},
     test_hit_steps: if (builtin.is_test) u64 else void = if (builtin.is_test) 0 else {},
+    // Editor cursor work: placements tried and releases written.
+    test_cursor_steps: if (builtin.is_test) u64 else void = if (builtin.is_test) 0 else {},
 
     pub fn init(allocator: std.mem.Allocator, config: *yoga.Config, session: handles.Handle) !*Scene {
         const self = try allocator.create(Scene);
@@ -1187,12 +1189,12 @@ pub const Scene = struct {
 
     fn releaseEditorCursor(self: *Scene, cli: *renderer.CliRenderer) void {
         if (!self.editor_cursor_owned) return;
+        if (builtin.is_test) self.test_cursor_steps += 1;
         cli.terminal.setCursorPosition(1, 1, false);
         self.editor_cursor_owned = false;
     }
 
     fn beginPaint(self: *Scene, cli: *renderer.CliRenderer, options: FrameOptions, members: usize) !void {
-        self.releaseEditorCursor(cli);
         const target = cli.getNextBuffer();
         target.clearScissorRects();
         target.clearOpacity();
@@ -1312,14 +1314,14 @@ pub const Scene = struct {
         defer target.clearScissorRects();
         defer target.clearOpacity();
         try self.beginPaint(cli, options, if (recording == null) self.work.items.len else self.paint_members.items.len);
-        const bytes = recording orelse {
-            for (self.work.items) |entry| {
-                if (entry.node.scene_node.?.kind == api.OT_SCENE_ROOT or !entry.visible) continue;
-                try self.paintMember(owner, cli, entry, options, .{});
-            }
-            return;
+        // The focused editor among the painted members owns the cursor, wherever it paints.
+        var cursor: ?Work = null;
+        if (recording == null) for (self.work.items) |entry| {
+            if (entry.node.scene_node.?.kind == api.OT_SCENE_ROOT or !entry.visible) continue;
+            try self.paintMember(owner, cli, entry, options, .{});
+            if (self.focusedEditor(entry.node.scene_node.?)) cursor = entry;
         };
-        for (self.paint_members.items) |member| {
+        if (recording) |bytes| for (self.paint_members.items) |member| {
             const value = owner.objects.get(member.node, .native_renderable, native.NativeRenderable) catch continue;
             std.debug.assert(value.scene_node.?.owner == self);
             const entry: Work = .{ .node = value, .layout = member.layout, .clip = member.clip, .opacity = member.opacity, .visible = true, .filtered = member.filtered or refresh_views };
@@ -1329,7 +1331,13 @@ pub const Scene = struct {
                 .hooks = self.paint_slots.items[member.slot].hooks,
             };
             try self.paintMember(owner, cli, entry, options, phases);
-        }
+            if (self.focusedEditor(value.scene_node.?)) cursor = entry;
+        };
+        self.maintainCursor(cli, cursor);
+    }
+
+    fn focusedEditor(self: *const Scene, node: *const Node) bool {
+        return node.editor != null and self.focus != null and std.meta.eql(self.focus.?, node.handle);
     }
 
     fn paintMember(self: *Scene, owner: *Context, cli: *renderer.CliRenderer, entry: Work, options: FrameOptions, phases: Phases) !void {
@@ -1352,7 +1360,6 @@ pub const Scene = struct {
             if (phases.hooks & api.OT_SCENE_HOOK_RENDER_SELF != 0) {
                 try playPhase(owner, target, surface, entry, phases, api.OT_SCENE_RECORD_PHASE_SELF);
             } else try self.paintNode(cli, entry, cells);
-            if (node.kind == api.OT_SCENE_EDITOR) try self.paintEditorCursor(cli, node, cells);
             try playPhase(owner, target, surface, entry, phases, api.OT_SCENE_RECORD_PHASE_AFTER);
             if (node.kind == api.OT_SCENE_IMAGE) try finishImagePaint(target, node.control.image, cells);
         }
@@ -1467,26 +1474,23 @@ pub const Scene = struct {
         _ = try target.drawImage(source, source.render_id, @intFromFloat(x), @intFromFloat(y), @intFromFloat(width), @intFromFloat(height), @intFromFloat(pixel_width), @intFromFloat(pixel_height), source_x, source_y, source_width, source_height, state.protocol);
     }
 
-    fn paintEditorCursor(self: *Scene, cli: *renderer.CliRenderer, node: *const Node, layout: Layout) !void {
-        // Cursor maintenance follows self drawing even when a host hook replaces the body.
-        const editor = node.editor orelse return;
-        if (self.focus == null or !std.meta.eql(self.focus.?, node.handle)) return;
+    /// Once per painted frame: place the cursor for the focused editor member, or release it.
+    /// The cursor follows the editor even when a host hook replaces its body.
+    fn maintainCursor(self: *Scene, cli: *renderer.CliRenderer, focused: ?Work) void {
+        const entry = focused orelse return self.releaseEditorCursor(cli);
+        if (builtin.is_test) self.test_cursor_steps += 1;
+        const node = entry.node.scene_node.?;
+        const layout = cellLayout(entry.layout);
         if (node.control.editor.mouse_pointer < std.meta.tags(@import("terminal.zig").MousePointerStyle).len) cli.terminal.setMousePointerStyle(@enumFromInt(node.control.editor.mouse_pointer));
-        if (!node.control.editor.show_cursor) return;
-        const cursor = editor.view.getVisualCursor();
+        if (!node.control.editor.show_cursor) return self.releaseEditorCursor(cli);
+        const cursor = node.editor.?.view.getVisualCursor();
         // Terminal keeps zero-based row/column in u16 alongside its public position.
         const position_max = @as(f64, std.math.maxInt(u16)) + 1;
         const cursor_x = std.math.clamp(layout.screenX + @as(f64, @floatFromInt(cursor.visual_col)) + 1, 1, position_max);
         const cursor_y = std.math.clamp(layout.screenY + @as(f64, @floatFromInt(cursor.visual_row)) + 1, 1, position_max);
-        const style: @import("terminal.zig").CursorStyle = switch (node.control.editor.style) {
-            0 => .block,
-            1 => .line,
-            2 => .underline,
-            3 => .default,
-            else => return error.InvalidOptions,
-        };
         cli.terminal.setCursorPosition(@intFromFloat(cursor_x), @intFromFloat(cursor_y), true);
-        cli.terminal.setCursorStyle(style, node.control.editor.blinking);
+        // Styles 0 to 3 are the enum's order; sceneSetEditorOptions rejects others.
+        cli.terminal.setCursorStyle(@enumFromInt(node.control.editor.style), node.control.editor.blinking);
         cli.terminal.setCursorColor(node.control.editor.color);
         self.editor_cursor_owned = true;
     }
