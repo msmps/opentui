@@ -2405,7 +2405,42 @@ pub const OptimizedBuffer = struct {
                     text_work.add(.cluster_scan_steps, 1);
                 }
 
+                // Left of the viewport nothing draws and marks have no base, so skip whole chunks by
+                // width and resume after the last cluster that starts left of the viewport. The loop
+                // below steps over printable ASCII at one cell per byte and skips each other unit.
+                if (rendered_col_in_vline < horizontal_offset) {
+                    if (horizontal_offset - rendered_col_in_vline >= vchunk.width_cols) {
+                        text_work.add(.left_skip_steps, 1);
+                        document_cell_offset += vchunk.width_cols;
+                        rendered_col_in_vline += vchunk.width_cols;
+                        continue;
+                    }
+                    const target_col = col + (horizontal_offset - rendered_col_in_vline);
+                    var lo = special_idx;
+                    var hi = render_clusters.len;
+                    while (lo < hi) : (text_work.add(.left_skip_steps, 1)) {
+                        const mid = lo + (hi - lo) / 2;
+                        if (render_clusters[mid].col_start < target_col) lo = mid + 1 else hi = mid;
+                    }
+                    if (lo > special_idx and render_clusters[lo - 1].byte_start + render_clusters[lo - 1].byte_len <= byte_end) {
+                        byte_offset = render_clusters[lo - 1].byte_start + render_clusters[lo - 1].byte_len;
+                        col = render_clusters[lo - 1].col_start + render_clusters[lo - 1].width_cols;
+                        special_idx = lo;
+                    }
+                    document_cell_offset += col - vchunk.col_start_in_chunk;
+                    rendered_col_in_vline += col - vchunk.col_start_in_chunk;
+                }
+
                 text_buffer_loop: while (byte_offset < byte_end) {
+                    if (rendered_col_in_vline < horizontal_offset) {
+                        const gap_end = if (special_idx < render_clusters.len) @min(render_clusters[special_idx].byte_start, byte_end) else byte_end;
+                        const gap = chunk_bytes[byte_offset..][0..@min(gap_end -| byte_offset, horizontal_offset - rendered_col_in_vline)];
+                        const ascii_len: u32 = if (chunk.isAsciiOnly()) @intCast(gap.len) else @intCast(utf8.printableAsciiPrefixLen(gap));
+                        byte_offset += ascii_len;
+                        col += ascii_len;
+                        document_cell_offset += ascii_len;
+                        rendered_col_in_vline += ascii_len;
+                    }
                     const at_special = special_idx < render_clusters.len and render_clusters[special_idx].byte_start == byte_offset;
 
                     var grapheme_bytes: []const u8 = undefined;
