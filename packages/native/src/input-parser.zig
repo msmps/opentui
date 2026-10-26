@@ -254,7 +254,10 @@ pub const InputParser = struct {
     /// When the host should call feed with zero bytes, or null.
     pub fn deadlineNs(self: *const InputParser) ?u64 {
         const waits = switch (self.state) {
-            .ground, .expired, .paste => false,
+            // A UTF-8 lead byte's continuation bytes must follow, so no pause cuts a scalar short.
+            // Opt-in 8-bit Meta (urxvt meta8, rxvt --meta8, Eterm -8, iTerm2 Option as Meta) is read
+            // as UTF-8; an explicit "input is not UTF-8" mode could restore it without a timer.
+            .ground, .expired, .paste, .utf8 => false,
             .csi => |csi| !csi.deferred or !self.deferrable(),
             else => true,
         };
@@ -326,7 +329,6 @@ pub const InputParser = struct {
                 self.state = .ground;
                 emitReply(sink, self.unit[1..self.unit_len], .csi, flags.reply_fragment);
             },
-            .utf8 => |utf8| self.utf8Fallback(utf8.alt, sink),
             .csi => |csi| {
                 if (!csi.deferred and self.deferrable()) {
                     self.state = .{ .csi = .{ .alt = csi.alt, .deferred = true } };
@@ -340,7 +342,7 @@ pub const InputParser = struct {
             },
             // After 20 ms of silence the rest of the garbage is more likely typing.
             .discard => self.state = .ground,
-            .ground, .expired, .paste => unreachable,
+            .ground, .expired, .utf8, .paste => unreachable,
         }
     }
 
@@ -359,7 +361,7 @@ pub const InputParser = struct {
                     self.state = .ground;
                     pending = b;
                 },
-                .utf8 => |utf8| if (b & 0xc0 == 0x80) {
+                .utf8 => |utf8| if (utf8Continues(self.unit[0], self.unit_len, b)) {
                     self.append(b);
                     if (self.unit_len == utf8.expected) self.utf8Complete(utf8.alt, sink);
                 } else {
@@ -448,7 +450,7 @@ pub const InputParser = struct {
     fn utf8Complete(self: *InputParser, alt: bool, sink: *Sink) void {
         self.state = .ground;
         const bytes = self.unit[0..self.unit_len];
-        const scalar: u21 = std.unicode.utf8Decode(bytes) catch std.unicode.replacement_character;
+        const scalar: u21 = std.unicode.utf8Decode(bytes) catch unreachable;
         var buffer: [4]u8 = undefined;
         const text = if (alt) "" else utf8Encode(scalar, &buffer);
         emitKey(sink, if (alt) &.{ "\x1b", bytes } else &.{bytes}, scalar, .{ .alt = alt }, .{ .text = text });
@@ -1014,6 +1016,20 @@ fn parseDigits(bytes: []const u8) u32 {
     var value: u32 = 0;
     for (bytes) |b| value = value *| 10 +| (b - '0');
     return value;
+}
+
+/// Whether `b` can follow the `count` bytes of a scalar that starts with `lead`. The second byte's
+/// range excludes overlongs, surrogates, and scalars above U+10FFFF (Unicode Table 3-7), so a
+/// prefix that no byte can complete ends at once instead of waiting.
+fn utf8Continues(lead: u8, count: u16, b: u8) bool {
+    const low: u8, const high: u8 = if (count > 1) .{ 0x80, 0xbf } else switch (lead) {
+        0xe0 => .{ 0xa0, 0xbf },
+        0xed => .{ 0x80, 0x9f },
+        0xf0 => .{ 0x90, 0xbf },
+        0xf4 => .{ 0x80, 0x8f },
+        else => .{ 0x80, 0xbf },
+    };
+    return b >= low and b <= high;
 }
 
 fn utf8Encode(scalar: u21, buffer: *[4]u8) []const u8 {
