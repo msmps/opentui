@@ -1,7 +1,7 @@
 // Generated from packages/native/include/opentui.h and scripts/native-abi-pointers.ts.
 // Run `bun run generate:abi` in packages/core. Do not edit.
 // Inspect audit input: bun scripts/native-abi.ts --audit
-// ABI audit SHA-256: 10eee368320a1427c6ddda36ea4e053c5e98767805ea8db707ed1b1271b9923d
+// ABI audit SHA-256: 7bcbefa5ef7abb67efc032d175b9deaa56624d7e4055db4ba8be5ea6233bc828
 
 export const nativeSymbols = {
   ot_scene_set_hooks: { args: ["ptr", "buffer", "buffer"], returns: "i32" },
@@ -180,7 +180,7 @@ export const nativeSymbols = {
   ot_scene_set_text_view_paint: { args: ["ptr", "buffer", "u32"], returns: "i32" },
   ot_buffer_draw_text_view: { args: ["ptr", "buffer", "ptr", "buffer", "i32", "i32"], returns: "i32" },
   ot_buffer_draw_editor_view: { args: ["ptr", "buffer", "ptr", "buffer", "i32", "i32"], returns: "i32" },
-  ot_buffer_draw_scene_text: { args: ["ptr", "buffer", "ptr", "buffer", "i32", "i32"], returns: "i32" },
+  ot_buffer_draw_scene_body: { args: ["ptr", "buffer", "ptr", "buffer", "i32", "i32"], returns: "i32" },
   ot_scene_frame_acquire_buffer_lease: { args: ["ptr", "buffer", "buffer", "u32", "buffer"], returns: "i32" },
   ot_scene_frame_commit: { args: ["ptr", "buffer", "buffer", "u32", "buffer"], returns: "i32" },
   ot_context_abi_version: { args: [], returns: "u32" },
@@ -2063,7 +2063,7 @@ export const nativeConstants = {
   OT_SCENE_RECORD_COLOR_MATRIX: 7,
   OT_SCENE_RECORD_TEXT_VIEW: 8,
   OT_SCENE_RECORD_EDITOR_VIEW: 9,
-  OT_SCENE_RECORD_SCENE_TEXT: 10,
+  OT_SCENE_RECORD_SCENE_BODY: 10,
   OT_SCENE_RECORD_IMAGE: 11,
   OT_SCENE_RECORD_UNICODE: 12,
   OT_SCENE_RECORD_GRAYSCALE_FOREGROUND: 1,

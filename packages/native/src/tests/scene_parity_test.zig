@@ -207,6 +207,8 @@ const Stats = struct {
     resizes: u32 = 0,
     layout_changes: u32 = 0,
     records: u32 = 0,
+    /// SELF recordings of a box that play its native body.
+    bodies: u32 = 0,
     decoded: u32 = 0,
     /// Frames that end with an editor's cursor, and with a host cursor shown.
     editor_cursors: u32 = 0,
@@ -553,7 +555,10 @@ const Harness = struct {
             else => blk: {
                 const hooked = random.intRangeLessThan(usize, scaffold_slots, scaffold_slots + 4);
                 if (self.model.handles[hooked] == null) break :blk null;
-                const flags = random.intRangeLessThan(u32, 1, 128) & ~@as(u32, c.OT_SCENE_HOOK_LAYOUT_CHANGED);
+                var flags = random.intRangeLessThan(u32, 1, 128) & ~@as(u32, c.OT_SCENE_HOOK_LAYOUT_CHANGED);
+                // A box with a BEFORE hook also replaces its body, so recordings play native box bodies;
+                // boxes with only AFTER keep the native body under their recording.
+                if (self.model.kind[hooked] == .box and flags & c.OT_SCENE_HOOK_RENDER_BEFORE != 0) flags |= c.OT_SCENE_HOOK_RENDER_SELF;
                 break :blk .{ .hooks = .{ .slot = hooked, .flags = if (clear) 0 else flags } };
             },
         };
@@ -668,12 +673,12 @@ const Harness = struct {
     /// Drives one frame on both twins in lockstep. Returns false if both rejected the attempt.
     fn drive(self: *Harness, spec: FrameSpec) !bool {
         var requests: [2]?scene.FrameRequest = .{ null, null };
-        var recording: Recording = .{};
-        var record: ?[]const u8 = null;
+        var recordings: [2]Recording = .{ .{}, .{} };
+        var records: [2]?[]const u8 = .{ null, null };
         while (true) {
             const results = [2]anyerror!scene.FrameRequest{
-                self.twins[reference].owner.sceneFrameStepWithRecording(self.twins[reference].id, requests[reference], spec.options, record),
-                self.twins[candidate].owner.sceneFrameStepWithRecording(self.twins[candidate].id, requests[candidate], spec.options, record),
+                self.twins[reference].owner.sceneFrameStepWithRecording(self.twins[reference].id, requests[reference], spec.options, records[reference]),
+                self.twins[candidate].owner.sceneFrameStepWithRecording(self.twins[candidate].id, requests[candidate], spec.options, records[candidate]),
             };
             const first = results[reference] catch |err| {
                 try testing.expectError(err, results[candidate]);
@@ -682,14 +687,14 @@ const Harness = struct {
             const second = try results[candidate];
             try self.expectSameRequest(first, second);
             requests = .{ first, second };
-            record = null;
+            records = .{ null, null };
             switch (first.kind) {
                 0 => return true,
                 c.OT_SCENE_FRAME_RECORD => {
                     self.stats.records += 1;
-                    recording = .{};
-                    try self.expectSameSlots(first, second, &recording);
-                    record = recording.view();
+                    recordings = .{ .{}, .{} };
+                    try self.expectSameSlots(first, second, &recordings);
+                    records = .{ recordings[reference].view(), recordings[candidate].view() };
                 },
                 else => {
                     switch (first.kind) {
@@ -747,8 +752,9 @@ const Harness = struct {
         try testing.expectEqual(self.model.slotOf(reference, first.node), self.model.slotOf(candidate, second.node));
     }
 
-    /// The RECORD snapshots must match; both twins then get the same recording.
-    fn expectSameSlots(self: *const Harness, first: scene.FrameRequest, second: scene.FrameRequest, recording: *Recording) !void {
+    /// The RECORD snapshots must match; both twins then get the same recording, except that a box body names
+    /// each twin's own node.
+    fn expectSameSlots(self: *Harness, first: scene.FrameRequest, second: scene.FrameRequest, recordings: *[2]Recording) !void {
         const slots = [2][]const scene.PaintSlot{
             try self.twins[reference].owner.sceneFramePaintSlots(self.twins[reference].id, first),
             try self.twins[candidate].owner.sceneFramePaintSlots(self.twins[candidate].id, second),
@@ -762,11 +768,18 @@ const Harness = struct {
             try testing.expectEqual(a.opacity, b.opacity);
             // One phase per slot keeps the recording within its buffer.
             if (index >= 12) continue;
-            const phase: u32 = if (a.hooks & c.OT_SCENE_HOOK_RENDER_BEFORE != 0) c.OT_SCENE_RECORD_PHASE_BEFORE else if (a.hooks & c.OT_SCENE_HOOK_RENDER_SELF != 0) c.OT_SCENE_RECORD_PHASE_SELF else c.OT_SCENE_RECORD_PHASE_AFTER;
-            recording.slot(@intCast(index), phase);
+            // A box with a SELF hook plays its native body; other slots draw text or a fill.
+            const body = a.hooks & c.OT_SCENE_HOOK_RENDER_SELF != 0 and self.model.kind[self.model.slotOf(reference, a.node).?] == .box;
+            const phase: u32 = if (body) c.OT_SCENE_RECORD_PHASE_SELF else if (a.hooks & c.OT_SCENE_HOOK_RENDER_BEFORE != 0) c.OT_SCENE_RECORD_PHASE_BEFORE else if (a.hooks & c.OT_SCENE_HOOK_RENDER_SELF != 0) c.OT_SCENE_RECORD_PHASE_SELF else c.OT_SCENE_RECORD_PHASE_AFTER;
             const x: i32 = @intFromFloat(a.layout.screenX);
             const y: i32 = @intFromFloat(a.layout.screenY);
-            if (index % 2 == 0) recording.text("r", x, y) else recording.fill(x, y, 2, .{ @intCast(a.num), 40, 0, 255 });
+            if (body) self.stats.bodies += 1;
+            for (recordings, [2]context.Handle{ a.node, b.node }) |*recording, node| {
+                recording.slot(@intCast(index), phase);
+                if (body) {
+                    recording.append(c.ot_scene_record_view{ .header = .{ .size = 0, .operation = c.OT_SCENE_RECORD_SCENE_BODY }, .source = .{ .context_id = node.context_id, .slot = node.slot, .generation = node.generation }, .x = x, .y = y }, &.{});
+                } else if (index % 2 == 0) recording.text("r", x, y) else recording.fill(x, y, 2, .{ @intCast(a.num), 40, 0, 255 });
+            }
         }
     }
 
@@ -1054,10 +1067,10 @@ test "Scene twin Sessions match a forced full-frame reference on every frame" {
     // a request 335, hooked under a hidden ancestor 6,503, reply hid the requester's parent 36,
     // reply detached the requester 27, content-child RESIZE 49, a truncation change in its reply
     // 49, unmeasured content text replaced 15, UPDATE 3,081, RESIZE 56, LAYOUT_CHANGED 1,433,
-    // recordings 251, decoded 12,767, an editor's cursor 1,679, a host cursor 8,837, skipped
-    // paint 8,365, partly diffed 1,254, draft writes after paint 2,877, raw writes between frames
-    // 387, shared text changes shown 399, style changes shown 216, view binds 297, selections
-    // 231, equal re-sends 781, palette changes 84.
+    // recordings 251, box bodies 42, decoded 12,767, an editor's cursor 1,679, a host cursor
+    // 8,837, skipped paint 8,431, partly diffed 1,219, draft writes after paint 2,877, raw
+    // writes between frames 387, shared text changes shown 399, style changes shown 216, view
+    // binds 297, selections 231, equal re-sends 781, palette changes 84.
     const minimums: Stats = .{
         .reused = 145,
         .filtered = 250,
@@ -1072,6 +1085,7 @@ test "Scene twin Sessions match a forced full-frame reference on every frame" {
         .resizes = 14,
         .layout_changes = 350,
         .records = 60,
+        .bodies = 10,
         .decoded = 8000,
         .editor_cursors = 400,
         .host_cursors = 1600,
