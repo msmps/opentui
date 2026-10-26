@@ -541,7 +541,7 @@ test "Scene frame work counts each frame kind and publishes only presented scene
     (try f.owner.raw().getSession(f.id)).cancel();
 }
 
-const Retained = enum { unchanged, scroll, scroll_same, scroll_grow, scroll_colors, scroll_arrow, focus, blur, register, destroy_style, unbind, rebind, select, reset, styled_text, text_options, view_paint_off, view_paint_on, box_details, arrow, editor_select, editor_rebind, editor_unbind, z_order, surface_write, resend, same_width, sub_cell, palette, draft_write, session_draw, lease_next, lease_current, raw_render, skipped_commit, width_method, preserve, recorded, image };
+const Retained = enum { unchanged, scroll, scroll_same, scroll_grow, scroll_colors, scroll_arrow, focus, blur, register, destroy_style, unbind, rebind, select, reset, styled_text, text_options, view_paint_off, view_paint_on, box_details, arrow, slider, editor_select, editor_rebind, editor_unbind, z_order, surface_write, resend, same_width, sub_cell, palette, draft_write, session_draw, lease_next, lease_current, raw_render, skipped_commit, width_method, preserve, recorded, image };
 
 /// A node at a fixed place, painted after its earlier siblings.
 fn placedAt(f: Fixture, parent: context.Handle, kind: u32, num: u32, left: f32, top: f32, width: f32, height: f32) !context.Handle {
@@ -556,7 +556,7 @@ fn placedAt(f: Fixture, parent: context.Handle, kind: u32, num: u32, left: f32, 
 
 // Retained paint (B3) on a 10 x 9 screen: a box (rows 0-2), a text (row 3), a text view of a
 // styled shared buffer (row 4), an editor (row 5), a surface taller than its node (rows 6-7),
-// an arrow (row 8), at column 8 a parent (row 0) whose child (rows 2-3) paints under a
+// an arrow and a slider (row 8), at column 8 a parent (row 0) whose child (rows 2-3) paints under a
 // later sibling, and below them a scroll node (rows 4-7) of six rows. Each row changes one input and expects the rows it damages and the full-path
 // reasons. The table runs without VERIFY, then with it: VERIFY must pass and change no count.
 test "Scene frame retained paint damages the rows of changed inputs only" {
@@ -578,6 +578,7 @@ fn retainedTable(verify: bool, counts: []FrameWork) !void {
     _ = try placedAt(f, parent, c.OT_SCENE_BOX, 8, 0, 2, 2, 2);
     const above = try placedAt(f, f.root, c.OT_SCENE_BOX, 9, 8, 2, 2, 2);
     const arrow = try placedAt(f, f.root, c.OT_SCENE_ARROW, 11, 0, 8, 1, 1);
+    const slider = try placedAt(f, f.root, c.OT_SCENE_SLIDER, 30, 2, 8, 4, 1);
     const scroll = try placedAt(f, f.root, c.OT_SCENE_BOX, 12, 8, 4, 2, 4);
     try f.owner.sceneSetScroll(scroll, .{});
     for (0..6) |index| {
@@ -638,6 +639,7 @@ fn retainedTable(verify: bool, counts: []FrameWork) !void {
         .{ .change = .view_paint_on, .damage = 3 },
         .{ .change = .box_details, .damage = 5 },
         .{ .change = .arrow, .damage = 3 },
+        .{ .change = .slider, .damage = 3 },
         .{ .change = .editor_select, .damage = 3 },
         .{ .change = .editor_rebind, .damage = 3 },
         .{ .change = .editor_unbind, .damage = 3 },
@@ -700,6 +702,7 @@ fn retainedTable(verify: bool, counts: []FrameWork) !void {
             .view_paint_off, .view_paint_on => try f.owner.sceneSetTextViewPaint(view_node, row.change == .view_paint_on),
             .box_details => try f.owner.sceneSetBoxDetails(box, .{ .title = "t" }),
             .arrow => try f.owner.sceneSetArrow(arrow, .{ .direction = 1 }),
+            .slider => try f.owner.sceneSetSlider(slider, .{ .value = 70 }),
             .editor_rebind => {
                 fresh_editor = try f.owner.createEditorView(edit, 6, 1);
                 try f.owner.sceneSetEditorView(editor_node, fresh_editor);
