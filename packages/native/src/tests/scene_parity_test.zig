@@ -15,11 +15,12 @@
 //! - a frame kind it must reach: count it in `Stats` and give it a minimum in
 //!   the test.
 //! The script has editors, focus moves, host cursors, text views of one shared
-//! text buffer and syntax style, scroll nodes (D2b), and recordings that read views, editors,
-//! text bodies, composed and destroyed resources, clear, recolor, or draw an image (B7), but no
-//! image nodes or linked text, so image node and link shortcuts are invisible to it.
-//! Retained paint (B3) is its gate: the candidate verifies every row it keeps on
-//! even seeds and skips paint outright on odd seeds, and the script writes the
+//! text buffer and syntax style, scroll nodes (D2b), recordings that read views, editors,
+//! text bodies, composed and destroyed resources, clear, recolor, or draw an image (B7), linked
+//! text, and split renders with and without a frame (B4), but no image nodes, so image node
+//! shortcuts are invisible to it.
+//! Retained paint (B3, B4) is its gate: the candidate verifies every row it keeps or repaints
+//! in a band on even seeds and skips paint outright on odd seeds, and the script writes the
 //! buffers outside scene paint, before and after a draft's paint.
 const std = @import("std");
 const testing = std.testing;
@@ -237,9 +238,14 @@ const Stats = struct {
     /// Frames that end with an editor's cursor, and with a host cursor shown.
     editor_cursors: u32 = 0,
     host_cursors: u32 = 0,
-    /// Candidate frames that skipped paint (no damaged row), and that diffed some rows only.
+    /// Candidate frames that skipped paint (no damaged row), that diffed some rows only, and
+    /// that cleared some rows only (B4).
     skipped: u32 = 0,
     partial: u32 = 0,
+    banded: u32 = 0,
+    /// Frames presented by a split render, and snapshot-only split renders before a frame.
+    split_frames: u32 = 0,
+    split_snapshots: u32 = 0,
     /// Recorded candidate frames that kept some rows (B7), and recordings that clear, recolor,
     /// or draw an image.
     retained_records: u32 = 0,
@@ -293,6 +299,8 @@ const Harness = struct {
     /// Hooks draw differently when it advances, with no scene change.
     hook_tick: usize = 0,
     recorded: bool = false,
+    /// A split render moved the output, so the decoder no longer follows the screen.
+    split: bool = false,
 
     fn init(random: std.Random, side: std.Random, verify: bool) !Harness {
         var twins: [2]Fixture = undefined;
@@ -524,7 +532,9 @@ const Harness = struct {
                     @memcpy(bytes[len..][0..piece.len], piece);
                     len += piece.len;
                 }
-                try f.owner.sceneSetText(self.handle(twin, value.slot), bytes[0..len]);
+                // Some texts are links, so link references reach band edges.
+                if (value.seed & 0x40000 == 0) return f.owner.sceneSetText(self.handle(twin, value.slot), bytes[0..len]);
+                try f.owner.sceneSetStyledText(self.handle(twin, value.slot), bytes[0..len], &.{.{ .byte_count = @intCast(len), .foreground = .{ 255, 255, 255, 255 }, .background = .{ 0, 0, 0, 0 }, .link_url = "https://example.test/band" }});
             },
             .slider => |value| try f.owner.sceneSetSlider(self.handle(twin, value.slot), .{ .value = value.value, .orientation = value.orientation }),
             .text_options => |value| try f.owner.sceneSetTextOptions(self.handle(twin, value.slot), value.options),
@@ -1016,6 +1026,20 @@ const Harness = struct {
         }
         const stamps = self.twins[candidate].state.test_stamp_steps;
         self.recorded = false;
+        // Late in a run, since the decoder cannot follow a split's scrollback: a split render
+        // before the frame without one, and the frame presented by a split render.
+        const split = self.stats.frames >= 300 and self.random.uintLessThan(u32, 4) == 0;
+        if (split and self.random.boolean()) {
+            for (self.twins, self.scratch, 0..) |twin, scratch, index| {
+                const commits = [_]renderer.SplitSnapshot{.{ .snapshot = try twin.owner.raw().getBuffer(scratch), .row_columns = 2 }};
+                _ = try (try twin.owner.raw().getSession(twin.id)).renderSplit(null, &commits, 0, spec.force);
+                self.bytes[index].clearRetainingCapacity();
+                try self.drain(index);
+            }
+            try testing.expectEqualSlices(u8, self.bytes[reference].items, self.bytes[candidate].items);
+            self.stats.split_snapshots += 1;
+        }
+        if (split) self.split = true;
         if (!try self.drive(spec)) return;
         // A write after paint must reach the terminal, on a skipped or partly diffed draft too.
         if (self.random.uintLessThan(u32, 8) == 0) {
@@ -1036,6 +1060,9 @@ const Harness = struct {
             self.stats.draft_writes += 1;
         }
         try self.twins[reference].expectSameCells(self.twins[candidate]);
+        // The draft holds the frame with consistent grapheme and link accounting: a band clear
+        // releases the references of the cells it clears.
+        try expectBufferInvariants(self.twins[candidate].cli.getNextBuffer());
         try self.expectSameChildOrder();
         try self.expectPaintOrder();
         var hidden_hooked = false;
@@ -1049,8 +1076,12 @@ const Harness = struct {
         const cells = draft.cli.width * draft.cli.height;
         for (drafted_hits[0..cells], 0..) |*hit, index| hit.* = draft.draftHit(index);
         var statuses: [2]@import("../session.zig").RenderStatus = undefined;
-        for (self.twins, 0..) |twin, index| {
-            statuses[index] = try twin.owner.sceneFrameCommit(twin.id, twin.state.painted.?.ticket, spec.force);
+        const split_commit = split and self.random.boolean();
+        self.stats.split_frames += @intFromBool(split_commit);
+        for (self.twins, self.scratch, 0..) |twin, scratch, index| {
+            const commits = [_]renderer.SplitSnapshot{.{ .snapshot = try twin.owner.raw().getBuffer(scratch), .row_columns = 2 }};
+            const ticket = twin.state.painted.?.ticket;
+            statuses[index] = if (split_commit) try (try twin.owner.raw().getSession(twin.id)).renderSplit(ticket, &commits, 0, spec.force) else try twin.owner.sceneFrameCommit(twin.id, ticket, spec.force);
             self.bytes[index].clearRetainingCapacity();
             try self.drain(index);
         }
@@ -1073,6 +1104,7 @@ const Harness = struct {
         if (work.candidate_visits == 0) try testing.expectEqual(stamps, self.twins[candidate].state.test_stamp_steps);
         self.stats.skipped += @intFromBool(work.damage_rows == 0);
         self.stats.partial += @intFromBool(work.damage_rows != 0 and work.damage_rows < self.twins[candidate].cli.height);
+        self.stats.banded += @intFromBool(work.damage_rows != 0 and work.cells_cleared < @as(u64, self.twins[candidate].cli.width) * self.twins[candidate].cli.height);
         self.stats.retained_records += @intFromBool(self.recorded and work.damage_rows < self.twins[candidate].cli.height);
         // The content culls; a frame whose selection did not change tests no overlap (B5b).
         const culling = work.overlap_tests != 0 or (self.model.bound and !self.model.hidden[content_slot] and
@@ -1211,7 +1243,7 @@ const Harness = struct {
         var stream = self.terminal.vtStream();
         defer stream.deinit();
         stream.nextSlice(self.bytes[candidate].items);
-        if (!self.decoder_synced) return;
+        if (!self.decoder_synced or self.split) return;
         self.stats.decoded += 1;
         const cli = self.twins[candidate].cli;
         const pages = &self.terminal.screens.active.pages;
@@ -1249,9 +1281,28 @@ const Harness = struct {
         // Every visible node, the root included, at least once (B5a).
         var order: [node_count_max]usize = undefined;
         try testing.expect(work.candidate_visits > self.model.paintOrder(&order, 0, root_slot));
-        // Retained paint (B3): the reference clears and repaints every frame and diffs every row.
-        try testing.expect(work.cells_cleared >= cells);
+        // Retained paint (B3, B4): the reference clears every cell, paints every member in full, and
+        // diffs every row.
+        // A frame the encoder does not keep (tainted or with images) is cleared after encode too.
+        try testing.expectEqual(cells * (1 + @as(u64, @intFromBool(f.cli.retained_frame_id != work.work_frame_id))), work.cells_cleared);
         try testing.expectEqual(f.cli.height, work.damage_rows);
+        try testing.expectEqual(f.state.records.items.len, work.members_painted);
+        var member_cells: u64 = 0;
+        for (f.state.records.items) |record| {
+            const node = (try f.owner.raw().getRenderable(f.state.tokens.get(record.token).?)).scene_node.?;
+            const box = node.kind == c.OT_SCENE_BOX and record.inputs.record_digest == 0 and node.paint.borderSides == c.OT_BORDER_NONE and
+                (node.paint.shouldFill == 0 or node.paint.background[3] == 0) and (node.scroll == null or std.meta.eql(node.scroll.?.options.fills, .{ null, null, null }));
+            if (box) continue;
+            // As paint casts them: toward zero.
+            const cell = scene.cellLayout(record.inputs.layout);
+            const clip = record.inputs.clip;
+            const x: i64 = @intFromFloat(cell.screenX);
+            const y: i64 = @intFromFloat(cell.screenY);
+            const width = @min(x + @as(i64, @intFromFloat(cell.width)), clip.x + @as(i64, clip.width)) - @max(x, clip.x);
+            const height = @min(y + @as(i64, @intFromFloat(cell.height)), clip.y + @as(i64, clip.height)) - @max(y, clip.y);
+            if (width > 0 and height > 0) member_cells += @intCast(width * height);
+        }
+        try testing.expectEqual(member_cells, work.member_cells);
         // Every round refreshes every child of a bound, visible content (B2 W3).
         const content_shown = !self.model.hidden[content_slot] and !self.model.hiddenAbove(content_slot);
         if (self.model.bound and content_shown) try testing.expect(work.viewport_child_refreshes >= self.model.children[content_slot].items.len);
@@ -1338,23 +1389,24 @@ test "Scene twin Sessions match a forced full-frame reference on every frame" {
         const stats = try runParity(seed, 256);
         inline for (std.meta.fields(Stats)) |field| @field(total, field.name) +%= @field(stats, field.name);
     }
-    // Every frame kind B2, B3, D2b, and B5 rely on is reached in quantity, and each minimum
+    // Every frame kind B2, B3, D2b, B4, and B5 rely on is reached in quantity, and each minimum
     // fails if the draw that produces its kind is removed. Minimums are about a quarter of the
     // counts at 64 x 256 (decoded frames about two thirds), derived again after replies began to
     // destroy nodes: those must spare content rows, or viewport scenes fall below the culling
     // cutoff (filtered frames with a request fell from 441 to 51). Sibling marks draw from their
-    // own stream, so they keep the script's mix. Counts: reused 8,696, culling 1,140, culling
-    // with a request 331, kept lists in such a frame 52, hooked under a hidden ancestor 5,644,
-    // reply hid the requester's parent 43, reply detached the requester 38, reply destroyed a
-    // node 564, a RECORD reply changed the scene 98, content-child RESIZE 48, a truncation
-    // change in its reply 47, a sibling marked mid-batch 162, unmeasured content text replaced
-    // 21, UPDATE 4,590, RESIZE 71, LAYOUT_CHANGED 2,155, recordings 397, box bodies 81, decoded
-    // 12,838, an editor's cursor 1,649, a host cursor 8,202, skipped paint 8,213, partly diffed
-    // 1,283, recorded frames that kept rows 119, non-local or image recordings 21, steady reads
-    // 291, draft writes after paint 2,816, raw writes between frames 415, shared text changes
-    // shown 435, style changes shown 228, view binds 370, selections 236, equal re-sends 466,
-    // palette changes 94, frames showing a scroll node with children 941, scrolls and option
-    // changes 162, SCROLL requests 7.
+    // own stream, so they keep the script's mix. Counts: reused 8,753, culling 1,001, culling
+    // with a request 165, kept lists in such a frame 22, hooked under a hidden ancestor 5,551,
+    // reply hid the requester's parent 40, reply detached the requester 32, reply destroyed a
+    // node 522, a RECORD reply changed the scene 127, content-child RESIZE 43, a truncation
+    // change in its reply 42, a sibling marked mid-batch 148, unmeasured content text replaced
+    // 19, UPDATE 4,308, RESIZE 63, LAYOUT_CHANGED 2,057, recordings 538, box bodies 114, decoded
+    // 10,931, an editor's cursor 1,766, a host cursor 8,169, skipped paint 8,300, partly diffed
+    // 1,289, band frames 1,124, split renders with a frame 502 and before one 488, recorded
+    // frames that kept rows 165, non-local or image recordings 25, steady reads 328, draft writes
+    // after paint 2,815, raw writes between frames 404, shared text changes shown 438, style
+    // changes shown 227, view binds 366, selections 229, equal re-sends 461, palette changes 95,
+    // frames showing a scroll node with children 989, scrolls and option changes 153, SCROLL
+    // requests 6.
     const minimums: Stats = .{
         .reused = 2200,
         .filtered = 260,
@@ -1379,6 +1431,9 @@ test "Scene twin Sessions match a forced full-frame reference on every frame" {
         .host_cursors = 1900,
         .skipped = 2000,
         .partial = 300,
+        .banded = 290,
+        .split_frames = 130,
+        .split_snapshots = 130,
         .retained_records = 29,
         .non_local_records = 5,
         .steady_reads = 72,

@@ -429,19 +429,22 @@ fn presentWork(f: Fixture, how: struct { use_mouse: bool = true, force: bool = f
     return result;
 }
 
-/// The steady work of the two-member scene below. A frame with damage repaints both
-/// members; one without skips paint. Only a frame that walks prepares views (B5b).
+/// The steady work of the two-member scene below: the fill (row 0, 2 cells) and the text (row
+/// 1, 8 cells). A full frame repaints both; one damaged row clears and repaints only its
+/// member's row (B4); a frame without damage skips paint. Only a frame that walks prepares
+/// views (B5b).
 fn plainWork(frame_id: u64, visits: u64, reads: u64, solves: u64, rows_compared: u64, rows_diffed: u64, reasons: u32, damage: u32) FrameWork {
     const painted = damage != 0;
+    const band: ?u64 = if (damage == 1) (if (visits == 0) 2 else 8) else null;
     return .{
         .work_frame_id = frame_id,
         .candidate_visits = visits,
         .geometry_reads = reads,
         .yoga_solves = solves,
         .view_preparations = if (visits != 0) 3 else 0,
-        .members_painted = if (painted) 2 else 0,
-        .member_cells = if (painted) 10 else 0,
-        .cells_cleared = if (painted) 16 else 0,
+        .members_painted = if (band != null) 1 else if (painted) 2 else 0,
+        .member_cells = band orelse if (painted) 10 else 0,
+        .cells_cleared = if (band != null) 8 else if (painted) 16 else 0,
         .rows_compared = rows_compared,
         .rows_diffed = rows_diffed,
         .full_path_reasons = reasons,
@@ -552,6 +555,176 @@ fn placedAt(f: Fixture, parent: context.Handle, kind: u32, num: u32, left: f32, 
     try f.owner.sceneSetPositions(node, 3, .{ 1, 1, 0, 0 }, .{ left, top, 0, 0 });
     try f.owner.sceneMoveNode(node, parent, @intCast((try f.owner.raw().getRenderable(parent)).scene_node.?.children.items.len));
     return node;
+}
+
+// Band paint (B4) on a 6 x 52 screen: a text on every third row and a translucent box under
+// rows 1-4. Each row changes some members and expects the damaged rows, then the cells
+// cleared, members painted, and member cells of their bands. Runs one row apart merge, and
+// the sixteenth band takes every run after it. The table runs without VERIFY, then with it.
+test "Scene frame band frames clear and paint only the damaged rows' members" {
+    const Change = struct { texts: []const usize = &.{}, box: bool = false, work: [4]u64 };
+    const all = comptime blk: {
+        var indexes: [18]usize = undefined;
+        for (&indexes, 0..) |*index, value| index.* = value;
+        break :blk indexes;
+    };
+    const rows = [_]Change{
+        .{ .work = .{ 0, 0, 0, 0 } },
+        // One glyph: its row only.
+        .{ .texts = &.{0}, .work = .{ 1, 6, 1, 6 } },
+        // The box meets the text's band and paints only its row there.
+        .{ .texts = &.{1}, .work = .{ 1, 6, 2, 12 } },
+        .{ .texts = &.{ 0, 2 }, .work = .{ 2, 12, 2, 12 } },
+        // The box (rows 1-4) and row 6 merge across row 5.
+        .{ .texts = &.{2}, .box = true, .work = .{ 5, 36, 3, 36 } },
+        .{ .texts = &all, .work = .{ 18, 132, 19, 114 } },
+    };
+    var results: [2][rows.len][4]u64 = undefined;
+    for ([_]bool{ false, true }, &results) |verify, *counts| {
+        const f = try Fixture.init(testing.allocator, 6, 52, .{});
+        defer f.deinit();
+        if (verify) try f.owner.sceneSetDebugFlags(f.id, c.OT_SCENE_DEBUG_VERIFY);
+        const box = try placedAt(f, f.root, c.OT_SCENE_BOX, 2, 0, 1, 6, 4);
+        try f.owner.sceneSetPaint(box, .{ .background = .{ 0, 90, 0, 128 } });
+        var texts: [all.len]context.Handle = undefined;
+        for (&texts, 0..) |*text, index| {
+            text.* = try placedAt(f, f.root, c.OT_SCENE_TEXT, @intCast(3 + index), 0, @floatFromInt(3 * index), 6, 1);
+            try f.owner.sceneSetText(text.*, "hello");
+        }
+        _ = try presentWork(f, .{});
+        for (rows, counts, 0..) |row, *count, index| {
+            for (row.texts) |text| try f.owner.sceneSetText(texts[text], ([_][]const u8{ "a", "b", "c", "d", "e", "f" })[index]);
+            if (row.box) try f.owner.sceneSetPaint(box, .{ .background = .{ 0, 60, 0, 128 } });
+            const w = try presentWork(f, .{});
+            count.* = .{ w.damage_rows, w.cells_cleared, w.members_painted, w.member_cells };
+            try testing.expectEqual(row.work, count.*);
+        }
+        // A kept row that a full repaint would change fails a verified band frame.
+        if (!verify) continue;
+        for ([_]*@import("../buffer.zig").OptimizedBuffer{ f.cli.getNextBuffer(), f.cli.currentRenderBuffer }) |target| try target.drawText("X", 0, 50, ansi.rgbColor(255, 255, 255, 255), null, 0);
+        try f.owner.sceneSetText(texts[0], "z");
+        try testing.expectError(error.RetainedMismatch, f.owner.scenePaint(f.id, options.background, true, 0));
+    }
+    try testing.expectEqual(results[0], results[1]);
+    // A scroll node's bars paint on the band only, under a later box that covers them elsewhere.
+    const f = try Fixture.init(testing.allocator, 4, 4, .{});
+    defer f.deinit();
+    try f.owner.sceneSetDebugFlags(f.id, c.OT_SCENE_DEBUG_VERIFY);
+    const scroll = try placedAt(f, f.root, c.OT_SCENE_BOX, 2, 0, 0, 2, 4);
+    try f.owner.sceneSetScroll(scroll, .{});
+    for (0..6) |index| try f.owner.sceneSetStyle(try placedAt(f, scroll, c.OT_SCENE_BOX, @intCast(3 + index), 0, 0, 1, 1), 0, 6, 0, 0, 0, 0);
+    const cover = try placedAt(f, f.root, c.OT_SCENE_BOX, 10, 1, 2, 1, 1);
+    try f.owner.sceneSetPaint(cover, .{ .background = .{ 90, 0, 0, 255 } });
+    const label = try placedAt(f, f.root, c.OT_SCENE_TEXT, 11, 2, 0, 2, 1);
+    try f.owner.sceneSetText(label, "a");
+    _ = try presentWork(f, .{});
+    try f.owner.sceneSetText(label, "b");
+    const w = try presentWork(f, .{});
+    try testing.expectEqual(@as(u64, 4), w.cells_cleared);
+    try testing.expectEqual(@as(u8, 90), ansi.red(f.cli.currentRenderBuffer.get(1, 2).?.bg));
+}
+
+const BandCase = enum { space_border_tall, space_border_tracker, hooked_body, hooked_after, surface, offscreen_view, offscreen_view_self };
+
+/// Paints a 6 x 4 scene twice, changing one text in between, and returns the hash of the
+/// second draft's cells and the presented cells, and the state of a text view below the screen.
+fn bandCase(case: BandCase, flags: u32) ![3]u64 {
+    const f = try Fixture.init(testing.allocator, 6, 4, .{});
+    defer f.deinit();
+    try f.owner.sceneSetDebugFlags(f.id, flags);
+    // The text that changes: row 0, or row 2 for the shapes whose band lies below row 0.
+    const row: f32 = if (case == .space_border_tall or case == .hooked_body) 0 else 2;
+    const text = try placedAt(f, f.root, c.OT_SCENE_TEXT, 2, 0, row, 6, 1);
+    try f.owner.sceneSetText(text, "abcdef");
+    const box = try placedAt(f, f.root, c.OT_SCENE_BOX, 3, 0, row, 6, if (case == .space_border_tracker) 1 else 4 - row);
+    switch (case) {
+        // A transparent border of spaces over the text keeps its glyphs, also where the band
+        // cuts the box's corners or a wide glyph on a kept row fills the trackers.
+        .space_border_tall, .space_border_tracker => {
+            try f.owner.sceneSetPaint(box, .{ .borderSides = c.OT_BORDER_TOP, .background = .{ 0, 0, 0, 0 }, .borderColor = .{ 255, 0, 0, 255 } });
+            try f.owner.sceneSetBoxDetails(box, .{ .custom_border_chars = [_]u32{' '} ** 11 });
+            if (case == .space_border_tracker) try f.owner.sceneSetText(try placedAt(f, f.root, c.OT_SCENE_TEXT, 4, 0, 0, 6, 1), "\u{4e16}x");
+        },
+        // A hooked translucent box under rows 0-3 that the band meets in part: its body and
+        // phases after its BEFORE phase stay in the band.
+        .hooked_body, .hooked_after, .offscreen_view, .offscreen_view_self => {
+            try f.owner.sceneMoveNode(box, f.root, 0);
+            try f.owner.sceneSetStyle(box, 4, 1, 0, 1, 4, 1);
+            try f.owner.sceneSetPositions(box, 3, .{ 1, 1, 0, 0 }, .{ 0, 0, 0, 0 });
+            try f.owner.sceneSetPaint(box, .{ .background = .{ 0, 90, 0, 128 } });
+            try f.owner.sceneSetHooks(box, c.OT_SCENE_HOOK_RENDER_BEFORE | c.OT_SCENE_HOOK_RENDER_AFTER, 1, 0, 0);
+            // A later box covers row 0, where the AFTER phase draws.
+            if (case == .hooked_after) try f.owner.sceneSetPaint(try placedAt(f, f.root, c.OT_SCENE_BOX, 5, 0, 0, 6, 1), .{ .background = .{ 90, 0, 0, 255 } });
+        },
+        // A surface with transparent cells repaints with the text's band, and a later wide glyph
+        // on a kept row fills the trackers: the copy does not depend on them.
+        .surface => {
+            const custom = try placedAt(f, f.root, c.OT_SCENE_CUSTOM, 6, 0, 1, 6, 1);
+            const surface = try f.owner.createBuffer(6, 1, .{});
+            try f.owner.drawBufferText(surface, "s", 2, 0, ansi.rgbColor(255, 255, 255, 255), null, 0);
+            try f.owner.sceneSetSurface(custom, surface);
+            try f.owner.sceneSetText(try placedAt(f, f.root, c.OT_SCENE_TEXT, 4, 0, 0, 6, 1), "\u{4e16}x");
+        },
+    }
+    // A text view below the screen, which a RECORD reply rebinds and resizes: the recorded frame
+    // prepares the view as a full repaint does, unless a SELF hook replaces its body.
+    const offscreen = case == .offscreen_view or case == .offscreen_view_self;
+    const shared = try f.owner.createTextBuffer(.unicode);
+    try f.owner.textBufferSetText(shared, "below");
+    const below = try placedAt(f, f.root, c.OT_SCENE_TEXT_VIEW, 7, 0, 10, 6, 1);
+    if (offscreen) try f.owner.sceneSetTextView(below, try f.owner.createTextBufferView(shared));
+    if (case == .offscreen_view_self) try f.owner.sceneSetHooks(below, c.OT_SCENE_HOOK_RENDER_SELF, 1, 0, 0);
+    var hashes: [3]u64 = undefined;
+    for ([_][]const u8{ "abcdef", "ghijkl" }) |value| {
+        try f.owner.sceneSetText(text, value);
+        var request = try f.owner.sceneFrameStep(f.id, null, options);
+        while (request.kind != c.OT_SCENE_FRAME_DONE) {
+            if (offscreen) {
+                try f.owner.sceneSetTextView(below, try f.owner.createTextBufferView(shared));
+                try f.owner.sceneSetStyle(below, 4, 0, 0, 1, if (value[0] == 'a') 5 else 6, 1);
+            }
+            var recording: Recording = .{};
+            const slots = try f.owner.sceneFramePaintSlots(f.id, request);
+            for (slots, 0..) |slot, index| if (slot.num == 3) {
+                recording.slot(@intCast(index), c.OT_SCENE_RECORD_PHASE_BEFORE);
+                recording.fill(0, if (case == .hooked_body) 0 else 2, 1, .{ 0, 0, 200, 255 });
+                recording.slot(@intCast(index), c.OT_SCENE_RECORD_PHASE_AFTER);
+                recording.text("h", 1, 0);
+            };
+            request = try f.owner.sceneFrameStepWithRecording(f.id, request, options, recording.view());
+        }
+        hashes[0] = cellsHash(f.cli.getNextBuffer());
+        _ = try f.owner.sceneFrameCommit(f.id, request, false);
+        try drain(f.owner, f.id);
+    }
+    hashes[1] = cellsHash(f.cli.currentRenderBuffer);
+    hashes[2] = 0;
+    if ((try f.owner.raw().getRenderable(below)).scene_node.?.control.text_view.view) |view| {
+        const viewport = view.view.getViewport();
+        hashes[2] = @as(u64, @intFromBool(view.view.virtual_lines_dirty)) | (if (viewport) |port| 2 | @as(u64, port.width) << 8 | @as(u64, port.height) << 24 else 0);
+    }
+    // The second frame is a band frame: it clears the changed text's row only, and the
+    // surface's row, which repaints on every frame.
+    if (flags != c.OT_SCENE_DEBUG_FULL_FRAME) try testing.expectEqual(@as(u64, if (case == .surface) 12 else 6), f.state.frame_work.cells_cleared);
+    return hashes;
+}
+
+fn cellsHash(target: *const @import("../buffer.zig").OptimizedBuffer) u64 {
+    var hash = std.hash.Wyhash.init(0);
+    inline for (.{ target.buffer.char, target.buffer.fg, target.buffer.bg, target.buffer.attributes }) |slice| hash.update(std.mem.sliceAsBytes(slice));
+    return hash.final();
+}
+
+// Band frames draw what a full repaint draws, in the draft and on the screen, with and without
+// VERIFY, where a primitive's fast path depends on its scissor or on other rows' cells, and
+// where a hook's phases re-enter their member's scissor.
+test "Scene frame band frames paint what a full repaint paints" {
+    for (std.enums.values(BandCase)) |case| {
+        errdefer std.debug.print("case {s}\n", .{@tagName(case)});
+        const full = try bandCase(case, c.OT_SCENE_DEBUG_FULL_FRAME);
+        try testing.expectEqual(full, try bandCase(case, 0));
+        try testing.expectEqual(full, try bandCase(case, c.OT_SCENE_DEBUG_VERIFY));
+    }
 }
 
 // Retained paint (B3) on a 10 x 9 screen: a box (rows 0-2), a text (row 3), a text view of a
@@ -2139,19 +2312,20 @@ test "Scene frame work counts viewport refresh and culling work" {
 // Unchanged frames paint and diff nothing (B3) and keep both lists through hooks and filters
 // (B5a), so they walk and stamp nothing; the scroll scene's status text is as tall as
 // the screen, so its glyph damages every row. A recorded frame whose recording did not change
-// paints nothing either (B7). A reply that sends the target's text again marks its path: the
-// later pass costs that path (scroll-100: 10 more feedback operations, 2 more child steps).
+// paints nothing either (B7). A frame with damage clears and paints only the damaged rows'
+// members (B4). A reply that sends the target's text again marks its path: the later pass
+// costs that path.
 test "Scene frame bench scenes pin each frame kind's work at small sizes" {
     const bench = @import("../bench/scene-frame_bench.zig");
     const rows = [_]struct { shape: bench.Shape, size: u32, change: bench.Change, work: [21]u64 }{
         .{ .shape = .ui, .size = 0, .change = .unchanged, .work = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0 } },
-        .{ .shape = .ui, .size = 0, .change = .glyph, .work = .{ 87, 0, 87, 87, 1, 0, 0, 0, 0, 86, 9009, 10000, 1, 1, 0, 0, 1, 1, 87, 0, 0 } },
+        .{ .shape = .ui, .size = 0, .change = .glyph, .work = .{ 87, 0, 87, 87, 1, 0, 0, 0, 0, 3, 209, 200, 1, 1, 0, 0, 1, 1, 87, 0, 0 } },
         .{ .shape = .ui, .size = 0, .change = .update_hook, .work = .{ 0, 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 4 } },
-        .{ .shape = .ui, .size = 0, .change = .reply_text, .work = .{ 87, 87, 88, 0, 0, 30, 0, 0, 0, 86, 9009, 10000, 1, 0, 0, 1, 1, 1, 87, 0, 11 } },
+        .{ .shape = .ui, .size = 0, .change = .reply_text, .work = .{ 87, 87, 88, 0, 0, 30, 0, 0, 0, 3, 209, 200, 1, 0, 0, 1, 1, 1, 87, 0, 11 } },
         .{ .shape = .scroll, .size = 100, .change = .reply_text, .work = .{ 104, 104, 5, 0, 0, 20, 0, 0, 100, 53, 10000, 10000, 50, 0, 0, 1, 1, 50, 104, 0, 6 } },
         .{ .shape = .ui, .size = 0, .change = .paint_hook, .work = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0 } },
         .{ .shape = .boxes, .size = 100, .change = .unchanged, .work = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0 } },
-        .{ .shape = .boxes, .size = 100, .change = .background, .work = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 1, 6160, 1, 1, 0, 0, 1, 1, 0, 0, 0 } },
+        .{ .shape = .boxes, .size = 100, .change = .background, .work = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 1, 140, 1, 1, 0, 0, 1, 1, 0, 0, 0 } },
         .{ .shape = .scroll, .size = 100, .change = .unchanged, .work = .{ 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0 } },
         .{ .shape = .scroll, .size = 100, .change = .glyph, .work = .{ 104, 104, 5, 104, 1, 21, 0, 0, 200, 53, 10000, 10000, 50, 1, 0, 0, 1, 50, 104, 0, 106 } },
         .{ .shape = .scroll, .size = 100, .change = .scroll, .work = .{ 104, 104, 4, 0, 0, 21, 0, 0, 200, 53, 10000, 10000, 50, 50, 0, 0, 1, 50, 104, 53, 155 } },
