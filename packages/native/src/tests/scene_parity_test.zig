@@ -105,7 +105,7 @@ const FrameSpec = struct {
 };
 
 /// Reference tree: each node's children in Yoga order and its paint children in attachment
-/// order. A frame stably sorts the paint children of every parent it visits by z.
+/// order. Paint sorts a copy stably by z, so equal z paints in attachment order.
 const Model = struct {
     handles: [node_count_max]?[2]context.Handle = @splat(null),
     /// Each editor node's edit buffer, per twin.
@@ -166,10 +166,13 @@ const Model = struct {
     }
 
     /// Writes the visible descendants of `node` in paint order and returns the new count.
-    fn paintOrder(self: *Model, out: []usize, count: usize, node: usize) usize {
-        std.mem.sort(usize, self.paint[node].items, self, zLessThan);
+    fn paintOrder(self: *const Model, out: []usize, count: usize, node: usize) usize {
+        var sorted: [node_count_max]usize = undefined;
+        const children = sorted[0..self.paint[node].items.len];
+        @memcpy(children, self.paint[node].items);
+        std.mem.sort(usize, children, self, zLessThan);
         var next = count;
-        for (self.paint[node].items) |child| {
+        for (children) |child| {
             if (self.hidden[child]) continue;
             out[next] = child;
             next = self.paintOrder(out, next + 1, child);
@@ -1163,8 +1166,8 @@ const Harness = struct {
         }
     }
 
-    /// A paint list that the next frame may keep is in the model's order. The model sorts on
-    /// every frame, as the scene does, so tie orders stay in step; it does not cull.
+    /// A paint list that the next frame may keep is in the model's order. The model does not
+    /// cull.
     fn expectPaintOrder(self: *Harness) !void {
         const f = self.twins[candidate];
         var order: [node_count_max]usize = undefined;
@@ -1394,19 +1397,19 @@ test "Scene twin Sessions match a forced full-frame reference on every frame" {
     // counts at 64 x 256 (decoded frames about two thirds), derived again after replies began to
     // destroy nodes: those must spare content rows, or viewport scenes fall below the culling
     // cutoff (filtered frames with a request fell from 441 to 51). Sibling marks draw from their
-    // own stream, so they keep the script's mix. Counts: reused 8,753, culling 1,001, culling
-    // with a request 165, kept lists in such a frame 22, hooked under a hidden ancestor 5,551,
-    // reply hid the requester's parent 40, reply detached the requester 32, reply destroyed a
-    // node 522, a RECORD reply changed the scene 127, content-child RESIZE 43, a truncation
-    // change in its reply 42, a sibling marked mid-batch 148, unmeasured content text replaced
-    // 19, UPDATE 4,308, RESIZE 63, LAYOUT_CHANGED 2,057, recordings 538, box bodies 114, decoded
-    // 10,931, an editor's cursor 1,766, a host cursor 8,169, skipped paint 8,300, partly diffed
-    // 1,289, band frames 1,124, split renders with a frame 502 and before one 488, recorded
-    // frames that kept rows 165, non-local or image recordings 25, steady reads 328, draft writes
-    // after paint 2,815, raw writes between frames 404, shared text changes shown 438, style
-    // changes shown 227, view binds 366, selections 229, equal re-sends 461, palette changes 95,
-    // frames showing a scroll node with children 989, scrolls and option changes 153, SCROLL
-    // requests 6.
+    // own stream, so they keep the script's mix. Counts: reused 8,780, culling 1,092, culling
+    // with a request 201, kept lists in such a frame 25, hooked under a hidden ancestor 5,282,
+    // reply hid the requester's parent 44, reply detached the requester 35, reply destroyed a
+    // node 496, a RECORD reply changed the scene 117, content-child RESIZE 45, a truncation
+    // change in its reply 44, a sibling marked mid-batch 127, unmeasured content text replaced
+    // 22, UPDATE 4,159, RESIZE 58, LAYOUT_CHANGED 2,064, recordings 515, box bodies 95, decoded
+    // 10,925, an editor's cursor 1,824, a host cursor 8,201, skipped paint 8,248, partly diffed
+    // 1,301, band frames 1,141, split renders with a frame 492 and before one 490, recorded
+    // frames that kept rows 151, non-local or image recordings 24, steady reads 328, draft writes
+    // after paint 2,802, raw writes between frames 406, shared text changes shown 449, style
+    // changes shown 235, view binds 367, selections 224, equal re-sends 462, palette changes 96,
+    // frames showing a scroll node with children 983, scrolls and option changes 151, SCROLL
+    // requests 4.
     const minimums: Stats = .{
         .reused = 2200,
         .filtered = 260,
