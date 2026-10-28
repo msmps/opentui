@@ -45,9 +45,12 @@ runs:
     - if: steps.policy.outputs.save == 'true' && steps.restore.outputs.cache-hit != 'true'
       shell: bash
       run: |
-        size_mb="$(du -sm .zig-cache 2>/dev/null | cut -f1)"
-        echo "Zig cache: ${size_mb:-0} MB"
-        if [ "${size_mb:-0}" -gt 2048 ]; then
+        size_mb=0
+        if [ -d .zig-cache ]; then
+          size_mb="$(du -sm .zig-cache | cut -f1)"
+        fi
+        echo "Zig cache: $size_mb MB"
+        if [ "$size_mb" -gt 2048 ]; then
           echo "Over 2048 MB; this job starts with an empty Zig cache"
           rm -rf .zig-cache
         fi
