@@ -76,8 +76,6 @@ pub const ShutdownStatus = enum(u8) {
 
 const READ_MIME_COUNT_MAX: u32 = 64;
 const READ_MIME_ESSENCE_BYTES_MAX: u32 = 255;
-// Bounds within-operation restarts when a chosen offer's source vanishes mid-read.
-const WAYLAND_READ_STALE_RETRY_MAX: u8 = 2;
 const OPERATIONS_MAX_DEFAULT: u32 = 16;
 const PROVIDER_TRANSFERS_MAX_DEFAULT: u32 = 16;
 const ResultKind = enum { mime, data, diagnostic };
@@ -1063,7 +1061,7 @@ pub const Service = struct {
         if (operation.result_mime.len > 0) operation.allocator.free(operation.result_mime);
         operation.result_mime = &.{};
         operation.transfer_data.clearRetainingCapacity();
-        if (operation.wayland_stale_retry_count < WAYLAND_READ_STALE_RETRY_MAX) {
+        if (operation.wayland_stale_retry_count < clipboard_wayland.READ_RETRY_MAX) {
             operation.wayland_stale_retry_count += 1;
             operation.wayland_barrier_serial = 0;
             operation.preference_offset = 4;
@@ -2441,7 +2439,7 @@ test "clipboard Wayland BMP worker cancellation beats late conversion publicatio
     try std.testing.expectEqual(@as(usize, 0), operation.result.len);
 }
 
-test "clipboard failed core selection progress releases operation focus" {
+test "clipboard core selection releases focus on failure and skips data-control reads" {
     if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
     var symbols: clipboard_linux.WaylandSymbols = undefined;
     var wayland = clipboard_wayland.Connection.init(std.testing.allocator, &symbols, "", "", 1);
@@ -2472,6 +2470,12 @@ test "clipboard failed core selection progress releases operation focus" {
     try std.testing.expectEqual(clipboard_linux.Mechanism.wayland, operation.mechanism.?);
     try std.testing.expect(!operation.wayland_core_focus_acquired);
     try std.testing.expectEqual(@as(u32, 1), wayland.core_focus_users);
+
+    // A data-control read takes no helper: it stays on Wayland and waits for its barrier.
+    wayland.core_data_device = false;
+    operation.wayland_barrier_serial = 1;
+    try std.testing.expectEqual(OperationStatus.pending, service.driveWaylandRead(&operation));
+    try std.testing.expectEqual(clipboard_linux.Mechanism.wayland, operation.mechanism.?);
 }
 
 test "clipboard drain closes the Wayland connection only when nothing needs it" {
