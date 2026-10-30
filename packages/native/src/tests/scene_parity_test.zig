@@ -17,8 +17,9 @@
 //! The script has editors, focus moves, host cursors, text views of one shared
 //! text buffer and syntax style, scroll nodes (D2b), recordings that read views, editors,
 //! text bodies, composed and destroyed resources, clear, recolor, or draw an image (B7), linked
-//! text, split renders with and without a frame (B4), and arrows whose text reaches past
-//! their rect, but no image nodes, so image node shortcuts are invisible to it.
+//! text, split renders with and without a frame (B4), arrows whose text reaches past
+//! their rect, and boxes with titles and border glyphs of spaces, but no image nodes, so image
+//! node shortcuts are invisible to it.
 //! Retained paint (B3, B4) is its gate: the candidate verifies every row it keeps or repaints
 //! in a band on even seeds and skips paint outright on odd seeds, and the script writes the
 //! buffers outside scene paint, before and after a draft's paint.
@@ -98,6 +99,9 @@ const Op = union(enum) {
     /// An arrow's options and text, or a scroll node's bar arrow.
     arrow: struct { slot: usize, seed: u32 },
     scroll_arrow: struct { slot: usize, seed: u32 },
+    /// A box's titles and border glyphs, with top and bottom borders over a transparent
+    /// background, lifted a row over the node above it.
+    box: struct { slot: usize, seed: u32 },
 };
 
 /// Options drawn once per frame.
@@ -279,6 +283,10 @@ const Stats = struct {
     scroll_layouts: u32 = 0,
     /// Frames that show an arrow wholly left of the screen, whose text may reach into it.
     arrows_beside: u32 = 0,
+    /// Width changes of a shown text view node right after a recording drew its view.
+    view_resizes: u32 = 0,
+    /// Reference frames' records of an on-screen box with a border, some of whose glyphs are spaces.
+    framed_boxes: u32 = 0,
     /// Folds every candidate frame's work counts, to check that a seed replays identically.
     digest: u64 = 0,
 };
@@ -544,6 +552,10 @@ const Harness = struct {
                 try f.owner.sceneSetStyledText(self.handle(twin, value.slot), bytes[0..len], &.{.{ .byte_count = @intCast(len), .foreground = .{ 255, 255, 255, 255 }, .background = .{ 0, 0, 0, 0 }, .link_url = "https://example.test/band" }});
             },
             .arrow => |value| try f.owner.sceneSetArrow(self.handle(twin, value.slot), arrowOptions(value.seed)),
+            .box => |value| {
+                try f.owner.sceneSetBoxDetails(self.handle(twin, value.slot), boxDetails(value.seed));
+                try f.owner.scenePatchPaint(self.handle(twin, value.slot), c.OT_SCENE_PROPERTY_BORDER | c.OT_SCENE_PROPERTY_BACKGROUND | c.OT_SCENE_PROPERTY_TRANSLATE_Y, .{ .borderSides = c.OT_BORDER_TOP | c.OT_BORDER_BOTTOM | ((value.seed >> 24) & 5), .translateY = -1 });
+            },
             .scroll_arrow => |value| {
                 var options = arrowOptions(value.seed >> 2);
                 options.direction = 0;
@@ -632,7 +644,7 @@ const Harness = struct {
             21 => if (self.model.kind[slot] == .text_view) .{ .rebind = .{ .slot = slot, .bind = random.uintLessThan(u32, 4) != 0 } } else .{ .shared_text = random.int(u32) },
             22 => if (random.boolean()) .{ .shared_text = random.int(u32) } else .{ .highlight = .{ .start = random.uintLessThan(u32, 8), .end = random.uintLessThan(u32, 16) } },
             23 => .{ .register = .{ .foreground = random.int(u8), .destroy = random.uintLessThan(u32, 6) == 0 } },
-            24 => if (self.model.kind[slot] == .text) .{ .selection = .{ .slot = slot, .set = random.boolean(), .focus = random.intRangeAtMost(i32, 0, 8) } } else .{ .resend = slot },
+            24 => if (self.model.kind[slot] == .text) .{ .selection = .{ .slot = slot, .set = random.boolean(), .focus = random.intRangeAtMost(i32, 0, 8) } } else if (self.model.kind[slot] == .box) .{ .box = .{ .slot = slot, .seed = random.int(u32) } } else .{ .resend = slot },
             25 => if (self.scrollSlot()) |scroll| (if (random.uintLessThan(u32, 4) != 0) self.generateScroll(scroll) else .{ .resend = slot }) else .{ .resend = slot },
             26 => if (random.uintLessThan(u32, 6) == 0) .{ .palette = random.uintLessThan(u32, 4) } else .{ .raw = .{ .kind = random.uintLessThan(u32, 4), .x = random.intRangeAtMost(i32, -1, 20), .y = random.intRangeAtMost(i32, -1, 8) } },
             else => self.generateReply(slot),
@@ -750,9 +762,11 @@ const Harness = struct {
             0, 1 => blk: {
                 const fields = [_]u32{ c.OT_SCENE_PROPERTY_Z_INDEX, c.OT_SCENE_PROPERTY_OPACITY, c.OT_SCENE_PROPERTY_TRANSLATE_X, c.OT_SCENE_PROPERTY_BORDER, c.OT_SCENE_PROPERTY_BACKGROUND };
                 // Content children keep equal z most of the time, as scroll content does.
-                // A border change also sets focusable, so focus moves change border colors.
+                // A border change also sets focusable, so focus moves change border colors, and the
+                // border's style and colors; a background change also sets whether it fills.
                 var field = fields[random.uintLessThan(usize, fields.len)];
-                if (field == c.OT_SCENE_PROPERTY_BORDER) field |= c.OT_SCENE_PROPERTY_FOCUSABLE;
+                if (field == c.OT_SCENE_PROPERTY_BORDER) field |= c.OT_SCENE_PROPERTY_FOCUSABLE | c.OT_SCENE_PROPERTY_BORDER_STYLE | c.OT_SCENE_PROPERTY_BORDER_COLOR | c.OT_SCENE_PROPERTY_FOCUSED_BORDER_COLOR;
+                if (field == c.OT_SCENE_PROPERTY_BACKGROUND) field |= c.OT_SCENE_PROPERTY_SHOULD_FILL;
                 const z = if (self.model.parent[slot] == content_slot and random.uintLessThan(u32, 4) != 0) 0 else random.intRangeAtMost(i32, -2, 2);
                 break :blk .{
                     .paint = .{
@@ -766,6 +780,11 @@ const Harness = struct {
                             .borderSides = random.uintLessThan(u32, 16),
                             .focusable = random.boolean(),
                             .background = .{ random.int(u8), 0, 0, random.int(u8) },
+                            .shouldFill = @intFromBool(random.uintLessThan(u32, 4) != 0),
+                            .borderStyle = random.uintLessThan(u32, 4),
+                            // Opaque, so a border over a transparent background takes the fast path.
+                            .borderColor = .{ 255, random.int(u8), 0, 255 },
+                            .focusedBorderColor = .{ 0, random.int(u8), 255, 255 },
                         },
                     },
                 };
@@ -774,6 +793,8 @@ const Harness = struct {
             3 => .{ .style = .{ .slot = slot, .group = c.OT_STYLE_DIMENSION, .kind = random.uintLessThan(u32, 2), .unit = 1, .value = @floatFromInt(random.intRangeAtMost(u32, 1, 6)), .flags = 1 } },
             4 => if (self.model.kind[slot] == .arrow) .{ .arrow = .{ .slot = slot, .seed = random.int(u32) } } else if (self.model.kind[slot] == .text) self.generateText(slot) else if (self.model.kind[slot] == .slider)
                 .{ .slider = .{ .slot = slot, .value = @floatFromInt(random.uintLessThan(u32, 101)), .orientation = random.uintLessThan(u32, 2) } }
+            else if ((self.model.kind[slot] == .box or self.model.kind[slot] == .scroll) and random.boolean())
+                .{ .box = .{ .slot = slot, .seed = random.int(u32) } }
             else
                 .{ .style = .{ .slot = slot, .group = c.OT_STYLE_ENUM, .kind = c.OT_STYLE_ENUM_OVERFLOW, .unit = 0, .value = @floatFromInt(random.uintLessThan(u32, 2)), .flags = 0 } },
             else => if (random.uintLessThan(u32, 3) == 0)
@@ -854,10 +875,10 @@ const Harness = struct {
                     self.stats.records += 1;
                     self.recorded = true;
                     recordings = .{ .{}, .{} };
-                    try self.expectSameSlots(first, second, &recordings);
+                    const bound = try self.expectSameSlots(first, second, &recordings);
                     records = .{ recordings[reference].view(), recordings[candidate].view() };
                     // Paint hooks may edit what steady recordings read, or change the scene.
-                    if (self.generateRead()) |op| try self.apply(op);
+                    if (self.generateRead(bound)) |op| try self.apply(op);
                     if (self.random.uintLessThan(u32, 4) == 0) {
                         try self.reply();
                         self.stats.record_replies += 1;
@@ -974,8 +995,9 @@ const Harness = struct {
     }
 
     /// The RECORD snapshots must match; both twins then get the same recording, except that a box body names
-    /// each twin's own node.
-    fn expectSameSlots(self: *Harness, first: scene.FrameRequest, second: scene.FrameRequest, recordings: *[2]Recording) !void {
+    /// each twin's own node. Returns whether a steady recording drew the view of another, shown node.
+    fn expectSameSlots(self: *Harness, first: scene.FrameRequest, second: scene.FrameRequest, recordings: *[2]Recording) !bool {
+        var bound_read = false;
         const slots = [2][]const scene.PaintSlot{
             try self.twins[reference].owner.sceneFramePaintSlots(self.twins[reference].id, first),
             try self.twins[candidate].owner.sceneFramePaintSlots(self.twins[candidate].id, second),
@@ -1001,16 +1023,17 @@ const Harness = struct {
             if (body) self.stats.bodies += 1;
             // Other slots draw text or a fill, in their node or beside it, a view, an editor, a text
             // body, a composed buffer, or a destroyed view; the first one now and then clears,
-            // recolors, or draws an image. Three nodes in four draw the same reader, or the view of
-            // a text view node, on the last row of their clip on every frame, so only the
-            // resource's own changes, or that node's size, repaint them.
+            // recolors, or draws an image. Three nodes in four draw the same reader, or half of them
+            // the view of a shown text view node, on the last row of their clip on every frame, so
+            // only the resource's own changes, or that node's size, repaint them.
             const steady = (a.num + self.read_base) % 4 != 0 and !body;
             const variant = (index + self.hook_tick) % 8;
             const read = (a.num + self.read_base / 4) % 4;
-            const bound = if (read == 3) self.slotWith(.text_view) else null;
+            const bound = if (read % 3 == 0) self.slotWith(.text_view) else null;
             const rare = if (index == 0) self.random.uintLessThan(u32, 64) else 64;
             self.stats.non_local_records += @intFromBool(!body and rare < 4);
             self.stats.steady_reads += @intFromBool(steady and rare >= 4);
+            bound_read = bound_read or (steady and rare >= 4 and bound != null);
             const view_slot = self.slotWith(.text_view);
             for (recordings, [2]context.Handle{ a.node, b.node }, 0..) |*recording, node, twin| {
                 recording.slot(@intCast(index), phase);
@@ -1040,25 +1063,30 @@ const Harness = struct {
             }
         }
         if (self.random.uintLessThan(u32, 4) == 0) self.hook_tick +%= 1;
+        return bound_read;
     }
 
     /// Five times in eight, an edit to what a steady recording reads: a highlight of the
-    /// shared text, the readers, or the width of a node that shows a view.
-    fn generateRead(self: *Harness) ?Op {
+    /// shared text, the readers, or the width of a node that shows a view. After a recording
+    /// that drew that view, always its width, which no epoch tracks.
+    fn generateRead(self: *Harness, bound: bool) ?Op {
         const random = self.random;
-        return switch (random.uintLessThan(u32, 8)) {
+        const op: ?Op = switch (if (bound) 3 else random.uintLessThan(u32, 8)) {
             0 => .{ .highlight = .{ .start = random.uintLessThan(u32, 4), .end = random.uintLessThan(u32, 8) } },
             1, 2, 4 => .{ .reader = random.int(u32) },
             3 => .{ .style = .{ .slot = self.slotWith(.text_view) orelse return null, .group = c.OT_STYLE_DIMENSION, .kind = 0, .unit = 1, .value = @floatFromInt(random.intRangeAtMost(u32, 2, 8)), .flags = 1 } },
             else => null,
         };
+        if (op) |value| self.stats.view_resizes += @intFromBool(bound and value == .style and value.style.slot == self.slotWith(.text_view) and value.style.group == c.OT_STYLE_DIMENSION and value.style.kind == 0);
+        return op;
     }
 
     /// The first slot of a kind whose resource a recording can read, past the slots that
-    /// take paint hooks, so a recording reads another node's resource.
+    /// take paint hooks, so a recording reads another node's resource. A text view must be
+    /// shown, so that its node's size reaches the view.
     fn slotWith(self: *const Harness, kind: Kind) ?usize {
         for (self.model.handles[paint_hook_slots_end..], paint_hook_slots_end..) |maybe, slot| {
-            if (maybe != null and self.model.kind[slot] == kind and (kind != .text_view or self.model.views[slot][0] != null)) return slot;
+            if (maybe != null and self.model.kind[slot] == kind and (kind != .text_view or (self.model.views[slot][0] != null and self.model.shown(slot)))) return slot;
         }
         return null;
     }
@@ -1334,6 +1362,9 @@ const Harness = struct {
             const width = @min(x + @as(i64, @intFromFloat(cell.width)), clip.x + @as(i64, clip.width)) - @max(x, clip.x);
             const height = @min(y + @as(i64, @intFromFloat(cell.height)), clip.y + @as(i64, clip.height)) - @max(y, clip.y);
             if (width > 0 and height > 0) member_cells += @intCast(width * height);
+            if (width > 0 and height > 0 and node.kind == c.OT_SCENE_BOX and node.paint.borderSides != 0) if (node.control.box) |details| if (details.custom_border_chars) |chars| {
+                self.stats.framed_boxes += @intFromBool(std.mem.indexOfScalar(u32, &chars, ' ') != null);
+            };
         }
         try testing.expectEqual(member_cells, work.member_cells);
         // Every round refreshes every child of a bound, visible content (B2 W3).
@@ -1397,6 +1428,14 @@ fn arrowOptions(seed: u32) scene.ArrowOptions {
     return .{ .direction = seed % 4, .foreground = .{ 255, @intCast((seed >> 2) % 256), 0, 255 }, .text = texts[(seed >> 10) % texts.len] };
 }
 
+/// Titles at each alignment, and border glyphs that are all spaces, or some of them.
+fn boxDetails(seed: u32) scene.BoxDetails {
+    const titles = [_][]const u8{ "", "T", "title", "\u{754c}t" };
+    var chars: [11]u32 = undefined;
+    for (&chars, 0..) |*char, index| char.* = if (seed & 0x800 != 0 and (seed >> @intCast(index)) & 1 != 0) "+-|="[index % 4] else ' ';
+    return .{ .title = titles[(seed >> 12) % 4], .bottom_title = titles[(seed >> 14) % 4], .title_alignment = (seed >> 16) % 3, .bottom_title_alignment = (seed >> 18) % 3, .title_color = if ((seed >> 20) & 1 != 0) .{ 255, 255, 0, 255 } else null, .custom_border_chars = if ((seed >> 21) % 4 == 0) null else chars };
+}
+
 /// A recorded clear, a color matrix without and with a mask, or an image.
 fn appendNonLocal(recording: *Recording, kind: u32, image: context.Handle) void {
     const matrix = [16]f32{ 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
@@ -1431,70 +1470,71 @@ test "Scene twin Sessions match a forced full-frame reference on every frame" {
     }
     // Every frame kind B2, B3, D2b, B4, and B5 rely on is reached in quantity, and each minimum
     // fails if the draw that produces its kind is removed. Minimums are about a quarter of the
-    // counts at 64 x 256 (decoded frames about two thirds), derived again after replies began to
-    // destroy nodes: those must spare content rows, or viewport scenes fall below the culling
-    // cutoff (filtered frames with a request fell from 441 to 51). Sibling marks and remounts
-    // draw from their own stream, so they keep the script's mix. Arrows and negative positions
-    // changed the mix; the older minimums still hold, so they stay. Counts: reused 8,686,
-    // culling 830, culling with a request 347, kept lists in such a frame 64, culled paint lists
-    // checked 15,539, hooked under a hidden ancestor 7,122, reply hid the requester's parent 44,
-    // reply detached the requester 59, reply destroyed a node 451, a RECORD reply changed the
-    // scene 185, nodes remounted in a reply 5,657, content-child RESIZE 62, a truncation change
-    // in its reply 60, a sibling marked mid-batch 125, unmeasured content text replaced 24,
-    // UPDATE 3,600, RESIZE 69, LAYOUT_CHANGED 1,840, recordings 815, box bodies 134, decoded
-    // 10,892, an editor's cursor 1,362, a host cursor 7,772, skipped paint 8,491, partly diffed
-    // 1,288, band frames 1,120, split renders with a frame 483 and before one 481, recorded
-    // frames that kept rows 292, non-local or image recordings 36, steady reads 638, draft writes
-    // after paint 2,934, raw writes between frames 393, shared text changes shown 387, style
-    // changes shown 170, view binds 358, selections 252, equal re-sends 435, palette changes 72,
-    // frames showing a scroll node with children 431, scrolls and option changes 116, SCROLL
-    // requests 32, an arrow left of the screen 865.
+    // counts at 64 x 256 (decoded frames about two thirds), derived again after resized views and
+    // box details changed the mix. Replies that destroy nodes spare content rows, or viewport
+    // scenes fall below the culling cutoff. Sibling marks and remounts draw from their own
+    // stream, so they keep the script's mix. Counts: reused 8,784, culling 1,337, culling with a
+    // request 353, kept lists in such a frame 35, culled paint lists checked 15,420, hooked under
+    // a hidden ancestor 6,273, reply hid the requester's parent 44, reply detached the requester
+    // 45, reply destroyed a node 412, a RECORD reply changed the scene 161, nodes remounted in a
+    // reply 6,192, content-child RESIZE 66, a truncation change in its reply 65, a sibling marked
+    // mid-batch 130, unmeasured content text replaced 17, UPDATE 3,350, RESIZE 116,
+    // LAYOUT_CHANGED 1,661, recordings 723, box bodies 92, decoded 11,119, an editor's cursor
+    // 1,833, a host cursor 8,412, skipped paint 8,432, partly diffed 1,332, band frames 1,170,
+    // split renders with a frame 511 and before one 507, recorded frames that kept rows 231,
+    // non-local or image recordings 44, steady reads 392, draft writes after paint 2,882, raw
+    // writes between frames 412, shared text changes shown 440, style changes shown 174, view
+    // binds 338, selections 238, equal re-sends 365, palette changes 82, frames showing a scroll
+    // node with children 587, scrolls and option changes 110, SCROLL requests 26, an arrow left
+    // of the screen 1,160, a drawn view's node resized 112, framed box records 1,160.
     const minimums: Stats = .{
-        // SCROLL requests that deliver a LAYOUT request: 13 in one run.
-        .scroll_layouts = 3,
+        // SCROLL requests that deliver a LAYOUT request: 9 in one run.
+        .scroll_layouts = 2,
         .reused = 2200,
-        .filtered = 260,
+        .filtered = 350,
         .filtered_requests = 100,
-        .reused_filtered_requests = 18,
-        .culled_orders = 3900,
-        .hidden_hooked = 1150,
-        .reply_hides = 7,
-        .reply_detaches = 9,
-        .reply_destroys = 80,
-        .record_replies = 23,
-        .remounts = 1400,
-        .content_resizes = 11,
-        .content_reply_texts = 10,
-        .sibling_marks = 38,
-        .unmeasured_texts = 3,
-        .updates = 680,
-        .resizes = 13,
-        .layout_changes = 430,
-        .records = 98,
-        .bodies = 20,
-        .decoded = 8300,
-        .editor_cursors = 580,
-        .host_cursors = 1900,
-        .skipped = 2000,
-        .partial = 300,
+        .reused_filtered_requests = 11,
+        .culled_orders = 3800,
+        .hidden_hooked = 1500,
+        .reply_hides = 11,
+        .reply_detaches = 12,
+        .reply_destroys = 95,
+        .record_replies = 39,
+        .remounts = 1500,
+        .content_resizes = 17,
+        .content_reply_texts = 17,
+        .sibling_marks = 32,
+        .unmeasured_texts = 4,
+        .updates = 800,
+        .resizes = 30,
+        .layout_changes = 420,
+        .records = 180,
+        .bodies = 23,
+        .decoded = 7400,
+        .editor_cursors = 460,
+        .host_cursors = 2100,
+        .skipped = 2100,
+        .partial = 330,
         .banded = 290,
         .split_frames = 130,
         .split_snapshots = 130,
-        .retained_records = 29,
-        .non_local_records = 5,
-        .steady_reads = 72,
+        .retained_records = 56,
+        .non_local_records = 10,
+        .steady_reads = 97,
         .draft_writes = 720,
-        .raw_writes = 95,
-        .shared_changes = 95,
-        .style_changes = 49,
-        .rebinds = 89,
+        .raw_writes = 100,
+        .shared_changes = 110,
+        .style_changes = 44,
+        .rebinds = 84,
         .selections = 60,
-        .resends = 105,
-        .palettes = 19,
-        .scroll_frames = 300,
-        .scroll_changes = 42,
-        .scroll_requests = 2,
-        .arrows_beside = 210,
+        .resends = 91,
+        .palettes = 21,
+        .scroll_frames = 150,
+        .scroll_changes = 28,
+        .scroll_requests = 6,
+        .arrows_beside = 280,
+        .view_resizes = 26,
+        .framed_boxes = 290,
     };
     inline for (std.meta.fields(Stats)) |field| {
         if (comptime std.mem.eql(u8, field.name, "frames") or std.mem.eql(u8, field.name, "digest")) continue;
