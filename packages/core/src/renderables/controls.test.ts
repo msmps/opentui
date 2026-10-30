@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from "bun:test"
 import { OptimizedBuffer } from "../buffer.js"
 import type { Renderable } from "../Renderable.js"
 import { RGBA, rgbToHex } from "../lib/RGBA.js"
@@ -19,6 +19,7 @@ import { SelectRenderable } from "./Select.js"
 import { SliderRenderable } from "./Slider.js"
 import { TabSelectRenderable, type TabSelectOption, type TabSelectRenderableOptions } from "./TabSelect.js"
 import { TextRenderable } from "./Text.js"
+import { TextTableRenderable } from "./TextTable.js"
 import { TextareaRenderable } from "./Textarea.js"
 import { TimeToFirstDrawRenderable } from "./TimeToFirstDraw.js"
 
@@ -294,12 +295,22 @@ const translucent = {
   focusedBackgroundColor: "#30303080",
   selectedBackgroundColor: "#33445580",
 }
+const chunk = (text: string, bg?: string) => [{ __isChunk: true as const, text, bg: bg && RGBA.fromHex(bg) }]
+const table = [
+  [chunk("name"), chunk("value", "#203040"), chunk("note")],
+  [chunk("alpha"), chunk("1"), chunk("a long note that wraps")],
+  [chunk("設定"), chunk("2", "#203040"), chunk("b")],
+]
+const tableColors = { borderBackgroundColor: "#304050", selectionBg: "#605040", selectionFg: "#ffffff" }
 // Recorded into the frame, a control paints what its composed `buffered: true` buffer paints: exactly with opaque
 // layer colors, also under parent opacity 0.5, and within 2 per channel with translucent ones over a translucent
-// background. Translations cut the left and top edges, and the last one the bottom (the font's second row).
-// The "wide" rows put a wide glyph under the scroll indicator, over the transparent background; the font's "three"
-// is wider than the node. The frame after a key press makes no native draw call and has no buffer unless buffered.
-const recordCases: [string, typeof Select | typeof Tabs, object, number?][] = [
+// background. A row with a tolerance (0 is exact) runs at opacity 1 only: over a TextTable background, its cell, border
+// and selection layers blend per primitive under parent opacity < 1. Translations cut the left and top edges, and the
+// last one the bottom (the font's second row). The "wide" rows put a wide glyph under the scroll indicator, over the
+// transparent background; the font's "three" and the unwrapped table are wider than the node. The frame after a key
+// press, or a table's content change and selection, makes no native draw call and has no buffer unless buffered.
+type RecordCase = [string, typeof Select | typeof Tabs | typeof TextTableRenderable, object, number?]
+const recordCases: RecordCase[] = [
   ["Select", Select, { options: items, focusable: false }],
   ["Select focused", Select, { options: items, backgroundColor: "#101820", focusedBackgroundColor: "#182028" }],
   ["Select font", Select, { options: items.slice(2), font: "tiny", backgroundColor: "#101820", focusable: false }],
@@ -325,9 +336,26 @@ const recordCases: [string, typeof Select | typeof Tabs, object, number?][] = [
   ["TabSelect focused", Tabs, { options: wideItems.slice(0, 3), backgroundColor: "#101820" }],
   ["TabSelect empty", Tabs, { options: [], backgroundColor: "#101820", focusable: false }],
   ["TabSelect translucent", Tabs, { options: [...items, ...items], showUnderline: false, ...translucent }, 2],
+  ["TextTable", TextTableRenderable, { content: table, borderBackgroundColor: "#304050" }],
+  ["TextTable selected", TextTableRenderable, { content: table, ...tableColors }],
+  ["TextTable background", TextTableRenderable, { content: table, ...tableColors, backgroundColor: "#101820" }, 0],
+  ["TextTable unwrapped", TextTableRenderable, { content: table, wrapMode: "none", backgroundColor: "#101820" }, 0],
+  ["TextTable translucent", TextTableRenderable, { content: table, ...tableColors, backgroundColor: "#20202080" }, 0],
+  // A clip edge (x = -1) cuts the wide glyph; its visible half keeps its background.
+  [
+    "TextTable clipped wide glyph",
+    TextTableRenderable,
+    { content: Array.from({ length: 3 }, () => [chunk("界", "#203040")]), border: false },
+  ],
 ]
 
-test.each(recordCases)("%s records what its buffer composes", async (_, Control, options, tolerance = 0) => {
+// `tolerance` has a default so that Bun does not take a fourth parameter for a `done` callback in 3-element rows.
+const recordsComposed = async (
+  _: string,
+  Control: RecordCase[1],
+  options: object,
+  tolerance: number | undefined = undefined,
+) => {
   const errors: string[] = []
   const onError = ({ error }: { error: Error }) => errors.push(error.message)
   renderer.on(CliRenderEvents.RENDER_ERROR, onError)
@@ -336,10 +364,12 @@ test.each(recordCases)("%s records what its buffer composes", async (_, Control,
     .opentui.symbols
   const originals = { ...symbols }
   let draws = 0
+  let measures = 0
   for (const name of Object.keys(originals).filter((name) => name.startsWith("ot_buffer_draw"))) {
     symbols[name] = (...args) => (draws++, originals[name](...args))
   }
-  for (const opacity of tolerance ? [1] : [1, 0.5]) {
+  symbols.ot_text_buffer_view_measure = (...args) => (measures++, originals.ot_text_buffer_view_measure(...args))
+  for (const opacity of tolerance === undefined ? [1, 0.5] : [1]) {
     for (const [translateX, translateY] of [
       [0, 0],
       [0.5, 0.5],
@@ -357,28 +387,40 @@ test.each(recordCases)("%s records what its buffer composes", async (_, Control,
         parent.add(node)
         renderer.root.add(parent)
         if (node.focusable) node.focus()
-        if ("selectedIndex" in options) node.setSelectedIndex(options.selectedIndex as number)
+        if ("selectedIndex" in options) (node as SelectRenderable).setSelectedIndex(options.selectedIndex as number)
         await setup.renderOnce()
-        node.handleKeyPress(key(Control === Select ? "down" : "right"))
+        if (!(node instanceof TextTableRenderable)) node.handleKeyPress(key(Control === Select ? "down" : "right"))
+        else {
+          node.content = node.content.toReversed()
+          if ("selectionBg" in options) {
+            const [x, y] = [Math.trunc(node.x), Math.trunc(node.y)]
+            const requested = spyOn(node, "requestRender")
+            renderer.startSelection(node, x + 2, y + 1)
+            renderer.updateSelection(node, x + 9, y + 5)
+            expect(requested).toHaveBeenCalled()
+          }
+        }
         draws = 0
         await setup.renderOnce()
         expect([Reflect.get(node, "frameBuffer") === null, draws === 0]).toEqual([!buffered, !buffered])
-        // An unchanged frame paints the same cells.
+        // An unchanged frame paints the same cells and lays nothing out again.
         const painted = setup.captureSpans()
+        measures = 0
         await setup.renderOnce()
-        expect(setup.captureSpans()).toEqual(painted)
+        expect([setup.captureSpans(), measures]).toEqual([painted, 0])
         frames.push(
           cells(painted)
             .flat()
             .map(([text, fg, bg]) => [text, ...(fg?.toInts() ?? []), ...bg.toInts()]),
         )
+        renderer.clearSelection()
         parent.destroyRecursively()
         // A failed frame must not leave the previous control's cells for the next capture.
         await setup.renderOnce()
       }
       expect(errors.splice(0)).toEqual([])
       const [a, b] = frames
-      const close = (v: string | number, w: string | number) => v === w || Math.abs(+v - +w) <= tolerance
+      const close = (v: string | number, w: string | number) => v === w || Math.abs(+v - +w) <= (tolerance ?? 0)
       if (
         a.length !== b.length ||
         a.some((cell, i) => cell.length !== b[i].length || cell.some((v, j) => !close(v, b[i][j])))
@@ -389,7 +431,8 @@ test.each(recordCases)("%s records what its buffer composes", async (_, Control,
   }
   Object.assign(symbols, originals)
   renderer.off(CliRenderEvents.RENDER_ERROR, onError)
-})
+}
+test.each(recordCases)("%s records what its buffer composes", recordsComposed)
 
 // A font cut at the top or the bottom draws the rows inside the buffer. Every call returns the laid-out size, also
 // when no row is inside.
