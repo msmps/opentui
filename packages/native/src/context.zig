@@ -1888,6 +1888,7 @@ pub const Context = struct {
     pub fn drawSceneBodyOn(self: *Context, target: *buf.OptimizedBuffer, node_handle: Handle, x: i32, y: i32) !void {
         const node = try self.sceneNode(node_handle);
         const owned = node.scene_node.?;
+        try owned.owner.prepareOmitted(&self.objects, node);
         if (owned.text == null and owned.kind != api.OT_SCENE_BOX and owned.kind != api.OT_SCENE_SLIDER and owned.kind != api.OT_SCENE_ARROW) return error.WrongKind;
         if (x >= target.width or y >= target.height) return;
         const text = owned.text orelse return owned.owner.paintBody(&self.objects, target, node, x, y);
@@ -2062,6 +2063,7 @@ pub const Context = struct {
     fn sceneMutableNode(self: *Context, handle: Handle) !*native_renderable.NativeRenderable {
         const node = try self.sceneNode(handle);
         try (try self.getSession(node.scene_node.?.owner.session)).checkOpen();
+        try node.scene_node.?.owner.prepareOmitted(&self.objects, node);
         return node;
     }
 
@@ -2076,6 +2078,7 @@ pub const Context = struct {
         try self.beginMutation();
         defer self.mutating = false;
         const node = try self.sceneNode(handle);
+        try node.scene_node.?.owner.prepareOmitted(&self.objects, node);
         try yoga.check(yoga.nodeTeardownStatus(node.yoga_node));
         self.destroyToken(try self.objects.beginDestroy(handle));
     }
@@ -2280,7 +2283,8 @@ pub const Context = struct {
         defer self.mutating = false;
         // Detachment is also used by child-first wrapper cleanup after cancellation.
         const node = if (parent_handle == null) try self.sceneNode(handle) else try self.sceneMutableNode(handle);
-        const parent = if (parent_handle) |id| try self.sceneNode(id) else null;
+        if (parent_handle == null) try node.scene_node.?.owner.prepareOmitted(&self.objects, node);
+        const parent = if (parent_handle) |id| try self.sceneMutableNode(id) else null;
         try node.scene_node.?.owner.move(node, parent, index);
     }
 
@@ -2921,7 +2925,9 @@ pub const Context = struct {
 
     pub fn sceneGetPaintLayout(self: *Context, handle: Handle) !scene.Layout {
         try self.checkSceneRead();
-        return scene.getPaintLayout(try self.sceneNode(handle));
+        const node = try self.sceneNode(handle);
+        try node.scene_node.?.owner.prepareOmitted(&self.objects, node);
+        return scene.getPaintLayout(node);
     }
 
     /// Solve the Session root without painting or publishing output. Measurement

@@ -2,7 +2,7 @@
 //! (OT_SCENE_DEBUG_FULL_FRAME) and a candidate Session run one seeded script of
 //! scene mutations, host replies, and frames. After every frame the two must
 //! agree on host requests, in order, draft cells and hits, render status, encoded
-//! bytes, presented cells and hits, cursor, hit tests, public layouts, and every
+//! bytes, presented cells and hits, cursor, hit tests, public and paint layouts, and every
 //! node's paint order. FULL_FRAME visits every child, but it shares the feedback
 //! passes' rule for children a reply marks, so it is an independent reference for
 //! cells, hits, observations, and paint order, not for the order of hook calls.
@@ -287,6 +287,8 @@ const Stats = struct {
     view_resizes: u32 = 0,
     /// Reference frames' records of an on-screen box with a border, some of whose glyphs are spaces.
     framed_boxes: u32 = 0,
+    /// Frames that prepared a culled row's subtree where it showed (B5d).
+    subtree_preparations: u32 = 0,
     /// Folds every candidate frame's work counts, to check that a seed replays identically.
     digest: u64 = 0,
 };
@@ -588,6 +590,17 @@ const Harness = struct {
         return null;
     }
 
+    fn contentBox(self: *const Harness) ?usize {
+        const rows = self.model.children[content_slot].items;
+        if (rows.len == 0) return null;
+        const start = self.random.uintLessThan(usize, rows.len);
+        for (0..rows.len) |offset| {
+            const row = rows[(start + offset) % rows.len];
+            if (self.model.kind[row] == .box) return row;
+        }
+        return null;
+    }
+
     fn boxSlot(self: *const Harness) usize {
         while (true) {
             const slot = self.random.uintLessThan(usize, node_count_max);
@@ -622,7 +635,8 @@ const Harness = struct {
                     0...4 => content_slot,
                     5 => self.model.parent[slot] orelse root_slot,
                     6 => null,
-                    else => self.boxSlot(),
+                    // Half into a content row, so culled rows hold subtrees; paint hooks stay out.
+                    else => if (slot >= paint_hook_slots_end and random.boolean()) self.contentBox() orelse self.boxSlot() else self.boxSlot(),
                 };
                 const siblings = if (parent) |value| self.model.children[value].items.len else 0;
                 break :blk .{ .move = .{ .slot = slot, .parent = parent, .index = random.uintLessThan(u32, @intCast(siblings + 2)) } };
@@ -896,6 +910,8 @@ const Harness = struct {
                         else => self.stats.layout_changes += 1,
                     }
                     const requester = self.model.slotOf(reference, first.node).?;
+                    // The hook reads its request's paint geometry after its own changes.
+                    const asked = try self.twins[candidate].owner.sceneGetPaintLayout(second.node);
                     // A scroll in the reply paints at the new offset in the same frame.
                     if (first.kind == c.OT_SCENE_FRAME_SCROLL and self.random.boolean()) try self.apply(self.generateScroll(requester));
                     // A LAYOUT request from a reply arrives in the next frame.
@@ -930,6 +946,9 @@ const Harness = struct {
                             self.stats.reply_hides += 1;
                         }
                     };
+                    if (self.twins[candidate].owner.sceneGetPaintLayout(second.node)) |after| {
+                        try testing.expectEqualSlices(u8, std.mem.asBytes(&asked), std.mem.asBytes(&after));
+                    } else |_| {}
                 },
             }
         }
@@ -992,6 +1011,10 @@ const Harness = struct {
         try testing.expectEqual(first.layout_epoch, second.layout_epoch);
         try testing.expectEqual(first.hook_generation, second.hook_generation);
         try testing.expectEqual(self.model.slotOf(reference, first.node), self.model.slotOf(candidate, second.node));
+        if (first.kind == c.OT_SCENE_FRAME_DONE or first.kind == c.OT_SCENE_FRAME_RECORD) return;
+        // The geometry the request carries, culled nodes' too (B5d).
+        const painted = .{ try self.twins[reference].owner.sceneGetPaintLayout(first.node), try self.twins[candidate].owner.sceneGetPaintLayout(second.node) };
+        try testing.expectEqualSlices(u8, std.mem.asBytes(&painted[0]), std.mem.asBytes(&painted[1]));
     }
 
     /// The RECORD snapshots must match; both twins then get the same recording, except that a box body names
@@ -1098,6 +1121,7 @@ const Harness = struct {
             for (self.twins) |twin| try twin.owner.sceneFrameCancel(twin.id, twin.state.painted.?.ticket.frame_id);
         }
         const stamps = self.twins[candidate].state.test_stamp_steps;
+        const preparations = self.twins[candidate].state.test_subtree_preparations;
         self.recorded = false;
         // Late in a run, since the decoder cannot follow a split's scrollback: a split render
         // before the frame without one, and the frame presented by a split render.
@@ -1175,6 +1199,7 @@ const Harness = struct {
         self.stats.reused += @intFromBool(work.candidate_visits == 0);
         // A frame that keeps its candidates keeps their stamps too (B5a).
         if (work.candidate_visits == 0) try testing.expectEqual(stamps, self.twins[candidate].state.test_stamp_steps);
+        self.stats.subtree_preparations += @intFromBool(self.twins[candidate].state.test_subtree_preparations != preparations);
         self.stats.skipped += @intFromBool(work.damage_rows == 0);
         self.stats.partial += @intFromBool(work.damage_rows != 0 and work.damage_rows < self.twins[candidate].cli.height);
         self.stats.banded += @intFromBool(work.damage_rows != 0 and work.cells_cleared < @as(u64, self.twins[candidate].cli.width) * self.twins[candidate].cli.height);
@@ -1304,6 +1329,8 @@ const Harness = struct {
                 };
                 try testing.expectEqualSlices(u8, std.mem.asBytes(&first), std.mem.asBytes(&try layouts[1]));
             }
+            const painted = .{ try owners[0].owner.sceneGetPaintLayout(pair[0]), try owners[1].owner.sceneGetPaintLayout(pair[1]) };
+            try testing.expectEqualSlices(u8, std.mem.asBytes(&painted[0]), std.mem.asBytes(&painted[1]));
             // Resize baselines and prepared text views, including culled children's (B2 invariant 3).
             const nodes = .{ (try owners[0].owner.raw().getRenderable(pair[0])).scene_node.?, (try owners[1].owner.raw().getRenderable(pair[1])).scene_node.? };
             try testing.expectEqual(nodes[0].resize_width, nodes[1].resize_width);
@@ -1486,7 +1513,8 @@ test "Scene twin Sessions match a forced full-frame reference on every frame" {
     // writes between frames 412, shared text changes shown 440, style changes shown 174, view
     // binds 338, selections 238, equal re-sends 365, palette changes 82, frames showing a scroll
     // node with children 587, scrolls and option changes 110, SCROLL requests 26, an arrow left
-    // of the screen 1,160, a drawn view's node resized 112, framed box records 1,160.
+    // of the screen 1,160, a drawn view's node resized 112, framed box records 1,160, and frames
+    // that prepared a culled row's subtree where it showed 96.
     const minimums: Stats = .{
         // SCROLL requests that deliver a LAYOUT request: 9 in one run.
         .scroll_layouts = 2,
@@ -1535,6 +1563,7 @@ test "Scene twin Sessions match a forced full-frame reference on every frame" {
         .arrows_beside = 280,
         .view_resizes = 26,
         .framed_boxes = 290,
+        .subtree_preparations = 24,
     };
     inline for (std.meta.fields(Stats)) |field| {
         if (comptime std.mem.eql(u8, field.name, "frames") or std.mem.eql(u8, field.name, "digest")) continue;
