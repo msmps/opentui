@@ -10,6 +10,7 @@ const renderer = @import("../renderer.zig");
 const Fixture = @import("scene_fixture_test.zig").Fixture;
 
 const asset = "../core/src/tests/fixtures/video/testsrc-160x90-24fps-2s.mp4";
+const video_only_asset = "../core/src/tests/fixtures/video/testsrc-160x90-24fps-2s-video-only.mp4";
 const missing = "../core/src/tests/fixtures/video/missing.mp4";
 const frame_us: u32 = 41_667;
 
@@ -221,14 +222,22 @@ test "video seek replaces queued PCM and restarts the clock at the target" {
     value.play();
     try prebuffer(value);
     try mix(value, 4800);
-    try value.seek(1_000_000);
+    // A quarter period of the 440 Hz sine into the second: the new stream starts at a peak.
+    try value.seek(1_000_568);
     var state = value.getState();
     try testing.expectEqual(@as(u64, 0), state.audio_consumed_frames);
     try testing.expectEqual(@as(u64, 0), state.audio_produced_frames);
     try prebuffer(value);
-    try mix(value, 4800);
+    var output: [9600]f32 = undefined;
+    try testing.expectEqual(audio.Status.ok, value.mixOffline(&output, 4800));
     state = value.getState();
-    try testing.expectEqual(@as(i64, 1_100_000), state.current_time_us);
+    try testing.expectEqual(@as(i64, 1_100_568), state.current_time_us);
+    // It fades in from silence instead of stepping to the peak; the sine's own step is 0.0056.
+    var previous: f32 = 0;
+    for (output) |sample| {
+        try testing.expect(@abs(sample - previous) < 0.01);
+        previous = sample;
+    }
 }
 
 // Seeks while the audio thread refills: a seek repositions the audio decoder only between
@@ -497,7 +506,46 @@ test "video scene loop restarts playback at the end" {
     const state = try f.owner.videoGetState(node);
     try testing.expect(state.playing);
     try testing.expect(!state.ended);
-    try testing.expect(state.current_time_us < 500_000);
+    // The loop carries the 20 ms that ran past the end.
+    try testing.expect(state.current_time_us >= 15_000 and state.current_time_us < 500_000);
+}
+
+// Five loops of state reads at about 120, 30 and 7 fps, and after stalls that pass the end by more
+// than the clip, with the wall clock moved back instead of sleeping; one row pauses and resumes at
+// every read. The end falls between reads. Each loop carries the time past the end, so none loses it.
+test "video player loops keep the clip duration at any tick interval" {
+    var detail: [256]u8 = undefined;
+    const value = try video.Player.open(testing.allocator, video_only_asset, true, &detail);
+    defer value.deinit();
+    const total = value.video.info.duration_us;
+    try value.setLoop(true);
+    try value.play();
+    const Row = struct { interval_us: i64, pause: bool = false };
+    const rows = [_]Row{
+        .{ .interval_us = 8_333 },
+        .{ .interval_us = 33_000 },
+        .{ .interval_us = 140_000 },
+        .{ .interval_us = 2 * total + 70_000 },
+        .{ .interval_us = 33_000, .pause = true },
+    };
+    for (rows) |row| {
+        const origin = std.Io.Clock.now(.awake, testing.io).toMicroseconds();
+        try value.seek(0);
+        var elapsed_us: i64 = 0;
+        var state: video.PlayerState = undefined;
+        while (elapsed_us < 5 * total) : (elapsed_us += row.interval_us) {
+            value.clock_start_us -= row.interval_us;
+            if (row.pause) {
+                try value.pause();
+                try value.play();
+            }
+            state = value.snapshot();
+        }
+        // Only the real time spent in seeks is lost; a loop that restarts at 0 loses up to an interval.
+        const expected = @mod(elapsed_us + std.Io.Clock.now(.awake, testing.io).toMicroseconds() - origin, total);
+        errdefer std.debug.print("interval {d}: expected {d}, read {d}\n", .{ row.interval_us, expected, state.current_time_us });
+        try testing.expect(@mod(expected - state.current_time_us, total) < 4_000);
+    }
 }
 
 const gop_asset = "../core/src/tests/fixtures/video/gop-160x90-24fps-12s.mp4";
@@ -1058,28 +1106,48 @@ test "video scene audio failure continues playback silently from the audio posit
     try testing.expect(!(try f.owner.videoGetState(node)).failed);
 }
 
-test "video scene playback ends after the audio drains without paints" {
-    const f = try Fixture.init(testing.allocator, 8, 4, .{});
-    defer f.deinit();
-    const node = try videoNode(f);
-    _ = try f.owner.videoOpen(node, asset, true);
-    const value = try playerOf(f, node);
-    value.video.setAudioOffline(true);
-    try f.owner.videoControl(node, video.Player.seek, .{value.video.info.duration_us - 200_000});
-    try f.owner.videoControl(node, video.Player.play, .{});
-    // A device pulls the stream; only the audio thread publishes what it played.
-    var output: [960 * 2]f32 = undefined;
-    var state = try f.owner.videoGetState(node);
-    for (0..3000) |_| {
-        value.video.engine_lock.lockUncancelable(testing.io);
-        _ = audio.mixToBuffer(value.video.audio_engine.?, &output, 960, 2);
-        value.video.engine_lock.unlock(testing.io);
-        state = try f.owner.videoGetState(node);
-        if (state.ended) break;
-        sleepMs(1);
+// The only state read comes 30 ms after the audio drained: playback then ends, or loops to the
+// time since the drain. The second pass seeks while playing after that loop.
+test "video scene playback ends or loops after the audio drains without paints" {
+    for ([_]bool{ false, true }) |loop| {
+        const f = try Fixture.init(testing.allocator, 8, 4, .{});
+        defer f.deinit();
+        const node = try videoNode(f);
+        _ = try f.owner.videoOpen(node, asset, true);
+        const value = try playerOf(f, node);
+        value.video.setAudioOffline(true);
+        try f.owner.videoControl(node, video.Player.setLoop, .{loop});
+        for (0..@as(usize, if (loop) 2 else 1)) |pass| {
+            try f.owner.videoControl(node, video.Player.seek, .{value.video.info.duration_us - 200_000});
+            if (pass == 0) try f.owner.videoControl(node, video.Player.play, .{});
+            for (0..3000) |_| {
+                if (value.video.getState().audio_ended != 0) break;
+                sleepMs(1);
+            }
+            // A device pulls the whole queued tail; only the audio thread publishes what it played.
+            var output: [960 * 2]f32 = undefined;
+            const mixed_at = std.Io.Clock.now(.awake, testing.io).toMicroseconds();
+            for (0..12) |_| {
+                value.video.engine_lock.lockUncancelable(testing.io);
+                _ = audio.mixToBuffer(value.video.audio_engine.?, &output, 960, 2);
+                value.video.engine_lock.unlock(testing.io);
+            }
+            for (0..3000) |_| {
+                if (value.video.audioStats().?.state == audio.StreamState.ended) break;
+                sleepMs(1);
+            }
+            sleepMs(30);
+            // A later publish of the drained stream keeps the drain time.
+            try value.video.setVolume(0.5);
+            value.video.syncAudio();
+            const state = try f.owner.videoGetState(node);
+            try testing.expectEqual(!loop, state.ended);
+            try testing.expectEqual(loop, state.playing);
+            // The drain came after the mix began, so the carried time is at most the time since then.
+            const since_mix = std.Io.Clock.now(.awake, testing.io).toMicroseconds() - mixed_at;
+            if (loop) try testing.expect(state.current_time_us >= 25_000 and state.current_time_us <= since_mix);
+        }
     }
-    try testing.expect(state.ended);
-    try testing.expect(!state.playing);
 }
 
 test "video scene seek while playing continues from the target" {
