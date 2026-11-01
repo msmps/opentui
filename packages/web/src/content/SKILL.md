@@ -78,8 +78,8 @@ Use public package entry points instead of source-file deep imports.
 
 | Intent(s)                                                                                                            | Start here                                  |
 | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| `getting-started`, `intro`, `examples`, `agent-skill`                                                                | `docs/getting-started.mdx`                  |
-| `installation`, `quickstart`                                                                                         | `docs/getting-started/quickstart.mdx`       |
+| `getting-started`, `intro`, `installation`, `scaffolding`, `project-generator`, `examples`, `agent-skill`            | `docs/getting-started.mdx`                  |
+| `installation`, `quickstart`, `scaffolding`, `project-generator`                                                     | `docs/getting-started/quickstart.mdx`       |
 | `runtime-support`, `bun`, `nodejs`, `native-artifacts`, `ffi`, `permissions`, `libc`, `runtime-assets`               | `docs/getting-started/runtime-support.mdx`  |
 | `react`, `jsx`, `hooks`, `keyboard`, `paste`, `focus`, `blur`, `selection`, `animation`, `testing`                   | `docs/bindings/react.mdx`                   |
 | `solid`, `jsx`, `signals`, `hooks`, `keyboard`, `animation`, `testing`                                               | `docs/bindings/solid.mdx`                   |

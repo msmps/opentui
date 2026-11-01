@@ -157,12 +157,12 @@ export const DOC_MANIFEST = {
   "getting-started": page("start", 1, "Introduction", "orientation", {
     packages: ["@opentui/core", "@opentui/react", "@opentui/solid"],
     availability: FRAMEWORKS,
-    searchSymbols: ["createCliRenderer"],
+    searchSymbols: ["create-tui", "createCliRenderer"],
     related: ["getting-started/quickstart", "bindings/react", "bindings/solid"],
     url: "/docs",
   }),
   "getting-started/quickstart": page("start", 2, "Quickstart", "orientation", {
-    searchSymbols: ["createCliRenderer", "TextRenderable"],
+    searchSymbols: ["create-tui", "createCliRenderer", "TextRenderable"],
     related: ["core-concepts/renderer", "bindings/react", "bindings/solid", "core-concepts/lifecycle"],
   }),
   "getting-started/runtime-support": page("start", 3, "Runtime support", "decision-guide", {
